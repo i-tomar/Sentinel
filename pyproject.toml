@@ -8,6 +8,8 @@ license-files = ["LICENSE"]
 requires-python = ">=3.12,<3.14"
 authors = [{ name = "Ishan Singh Tomar" }]
 dependencies = [
+    "anyio==4.16.0",
+    "mcp==2.3.0",
     "pydantic==2.14.3",
     "pydantic-settings==2.16.2",
     "typer==0.27.3",
@@ -28,12 +30,12 @@ requires = ["hatchling==1.33.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/sentinel"]
+packages = ["src/sentinel", "servers"]
 
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-src = ["src", "tests"]
+src = ["src", ".", "tests"]
 
 [tool.ruff.lint]
 select = [
@@ -56,8 +58,8 @@ select = [
 [tool.mypy]
 python_version = "3.12"
 strict = true
-mypy_path = "src"
-files = ["src", "tests"]
+mypy_path = "src,."
+files = ["src", "servers", "tests"]
 plugins = ["pydantic.mypy"]
 warn_unreachable = true
 
@@ -71,5 +73,5 @@ testpaths = ["tests"]
 addopts = ["-ra", "--strict-markers", "--strict-config", "--import-mode=importlib"]
 markers = [
     "unit: fast, isolated tests with no I/O beyond tmp_path",
-    "integration: tests that run the graph against fixture MCP servers with MockLLM",
+    "integration: tests that talk to MCP servers (in-process or subprocess) or run the graph",
 ]

@@ -39,4 +39,6 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --locked
+      - name: Fixture data is up to date
+        run: uv run python -m servers.fixtures.generate --check
       - run: uv run pytest
