@@ -6,7 +6,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 LLMProvider = Literal["openai", "google", "anthropic", "mock"]
@@ -77,6 +77,19 @@ class Settings(BaseSettings):
                 raise ValueError("ALLOWED_EMAIL_DOMAINS must list at least one domain")
             return domains
         return value
+
+    @model_validator(mode="after")
+    def _tracing_backend_has_credentials(self) -> Settings:
+        if self.tracing_backend == "langfuse" and not (
+            self.langfuse_public_key and self.langfuse_secret_key
+        ):
+            raise ValueError(
+                "TRACING_BACKEND=langfuse needs LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY "
+                "(for local Langfuse: `uv run sentinel infra app-env`)"
+            )
+        if self.tracing_backend == "langsmith" and not self.langsmith_api_key:
+            raise ValueError("TRACING_BACKEND=langsmith needs LANGSMITH_API_KEY")
+        return self
 
 
 @lru_cache(maxsize=1)

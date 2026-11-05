@@ -77,6 +77,32 @@ def test_unknown_dotenv_key_is_rejected(isolated_env: Path) -> None:
         Settings()
 
 
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"TRACING_BACKEND": "langfuse"},
+        {"TRACING_BACKEND": "langfuse", "LANGFUSE_PUBLIC_KEY": "pk-lf-x"},
+        {"TRACING_BACKEND": "langsmith"},
+    ],
+)
+def test_tracing_backend_requires_credentials(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, str]
+) -> None:
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    with pytest.raises(ValidationError, match="TRACING_BACKEND"):
+        Settings()
+
+
+def test_langfuse_enabled_through_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TRACING_BACKEND", "langfuse")
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-x")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-x")
+    s = Settings()
+    assert s.tracing_backend == "langfuse"
+    assert s.langfuse_host == "http://localhost:3000"
+
+
 def test_secrets_are_masked_in_dumps(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LLM_API_KEY", "sk-very-secret")
     s = Settings()
