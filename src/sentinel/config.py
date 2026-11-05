@@ -10,7 +10,7 @@ from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 LLMProvider = Literal["openai", "google", "anthropic", "mock"]
-EmbeddingProvider = Literal["local", "openai", "google"]
+EmbeddingProvider = Literal["local", "hash", "openai", "google"]
 DataMode = Literal["fixture", "live"]
 MemoryBackendName = Literal["sqlite", "okf"]
 TracingBackend = Literal["langfuse", "langsmith", "none"]
@@ -41,6 +41,8 @@ class Settings(BaseSettings):
 
     # Storage
     qdrant_url: str = "http://localhost:6333"
+    """`http(s)://...` for a server, `:memory:` or a directory path for embedded Qdrant."""
+    qdrant_collection: str = Field(default="sentinel_chunks", pattern=r"^[A-Za-z0-9_-]+$")
     checkpoint_db: Path = Path("./.data/checkpoints.sqlite")
     memory_backend: MemoryBackendName = "sqlite"
     memory_db: Path = Path("./.data/memory.sqlite")
