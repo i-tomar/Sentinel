@@ -120,6 +120,17 @@ async def test_limit_is_validated(notion: Client) -> None:
     await call_error(notion, "search_pages", query="auth", limit=0)
 
 
+async def test_offset_pages_through_all_records(jira: Client) -> None:
+    keys: list[str] = []
+    while True:
+        page = await call(jira, "search_issues", limit=50, offset=len(keys))
+        keys += [r["key"] for r in page["results"]]
+        if len(keys) >= page["total"]:
+            break
+    assert len(keys) == len(set(keys)) == 80
+    await call_error(jira, "search_issues", offset=-1)
+
+
 # --- Jira ---------------------------------------------------------------------------------
 
 

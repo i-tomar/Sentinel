@@ -20,6 +20,7 @@ from servers.fixtures.common import (
     READ,
     WRITE,
     Limit,
+    Offset,
     load_gmail,
     rank,
     results_json,
@@ -64,6 +65,7 @@ def create_server(threads: Sequence[GmailThread] | None = None) -> MCPServer:
         before: date | None = None,
         label: str | None = None,
         limit: Limit = 10,
+        offset: Offset = 0,
     ) -> str:
         """Keyword search over subjects, bodies and addresses.
 
@@ -98,7 +100,7 @@ def create_server(threads: Sequence[GmailThread] | None = None) -> MCPServer:
                 last_message_at=t.messages[-1].sent_at,
                 snippet=snippet(t.messages[0].body, q),
             )
-            for t in ranked[:limit]
+            for t in ranked[offset : offset + limit]
         ]
         return results_json(hits, total=len(ranked))
 
