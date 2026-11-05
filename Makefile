@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help sync lint fmt typecheck test check up down ingest ask chat serve eval eval-fast baseline
+.PHONY: help sync lint fmt typecheck test check fixtures fixtures-check up down ingest ask chat serve eval eval-fast baseline
 
 UV ?= uv
 Q ?=
@@ -26,6 +26,12 @@ test: ## Unit + integration tests (mock LLM, fixture data, no credentials)
 	$(UV) run pytest
 
 check: lint test ## Everything CI runs
+
+fixtures: ## Regenerate deterministic fixture data (servers/fixtures/data)
+	$(UV) run python -m servers.fixtures.generate
+
+fixtures-check: ## Fail if committed fixture data is out of date
+	$(UV) run python -m servers.fixtures.generate --check
 
 # --- Targets below are wired up in later build steps -------------------------
 
