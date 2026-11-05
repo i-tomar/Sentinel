@@ -1,6 +1,6 @@
 """Opt-in: the same ingestion against a real Qdrant server (e.g. `make up`).
 
-Set SENTINEL_TEST_QDRANT_URL=http://localhost:6333. Uses a throwaway collection that the test
+Set SENTINEL_TEST_QDRANT_URL=http://127.0.0.1:6333. Uses a throwaway collection that the test
 creates and deletes; nothing else in the server is touched.
 """
 

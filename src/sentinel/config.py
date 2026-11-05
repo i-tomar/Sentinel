@@ -39,8 +39,9 @@ class Settings(BaseSettings):
     max_hops: int = Field(default=4, ge=1, le=16)
     tool_timeout_s: float = Field(default=10.0, gt=0, le=300)
 
-    # Storage
-    qdrant_url: str = "http://localhost:6333"
+    # Storage. Local URLs use 127.0.0.1, not localhost: compose binds IPv4 only, and on Windows
+    # localhost tries ::1 first, adding ~2 s to every request.
+    qdrant_url: str = "http://127.0.0.1:6333"
     """`http(s)://...` for a server, `:memory:` or a directory path for embedded Qdrant."""
     qdrant_collection: str = Field(default="sentinel_chunks", pattern=r"^[A-Za-z0-9_-]+$")
     checkpoint_db: Path = Path("./.data/checkpoints.sqlite")
@@ -50,7 +51,7 @@ class Settings(BaseSettings):
 
     # Tracing
     tracing_backend: TracingBackend = "none"
-    langfuse_host: str = "http://localhost:3000"
+    langfuse_host: str = "http://127.0.0.1:3000"
     langfuse_public_key: SecretStr | None = None
     langfuse_secret_key: SecretStr | None = None
     langsmith_api_key: SecretStr | None = None
