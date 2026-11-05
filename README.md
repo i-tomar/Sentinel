@@ -16,3 +16,18 @@ uv run sentinel config  # show effective settings (secrets masked)
 
 On Windows without GNU make, run the underlying commands from the `Makefile` directly
 (e.g. `uv run pytest`).
+
+## Fixture MCP servers
+
+CI and local development use fake Notion, Jira and Gmail MCP servers over a seeded "Acme"
+dataset (`servers/fixtures/data/`). No real accounts are involved; nothing is ever sent.
+
+```bash
+uv run python -m servers.fixtures.notion_mcp   # stdio; also jira_mcp, gmail_mcp
+make fixtures                                  # regenerate data deterministically
+make fixtures-check                            # fail if committed data is stale
+```
+
+Inject failures per source or tool, e.g.
+`SENTINEL_FIXTURE_FAILURES="gmail=timeout,jira.get_issue=error_500"`
+(modes: `timeout`, `error_500`, `empty`, `malformed`, `rate_limit`).
