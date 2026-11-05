@@ -12,6 +12,7 @@ from servers.fixtures.common import (
     EMPTY_RESULTS,
     READ,
     Limit,
+    Offset,
     load_notion,
     rank,
     results_json,
@@ -29,7 +30,7 @@ def create_server(pages: Sequence[NotionPage] | None = None) -> MCPServer:
     server = MCPServer("notion-fixture", instructions="Fake Acme Notion workspace (fixture data).")
 
     @server.tool(annotations=READ, structured_output=False)
-    async def search_pages(query: str, limit: Limit = 10) -> str:
+    async def search_pages(query: str, limit: Limit = 10, offset: Offset = 0) -> str:
         """Keyword search over page titles and bodies. Returns JSON {results: [...], total}."""
         if (
             override := await failure_modes.apply(SOURCE, "search_pages", empty=EMPTY_RESULTS)
@@ -52,7 +53,7 @@ def create_server(pages: Sequence[NotionPage] | None = None) -> MCPServer:
                 updated_at=p.updated_at,
                 snippet=snippet(p.body, q),
             )
-            for p in ranked[:limit]
+            for p in ranked[offset : offset + limit]
         ]
         return results_json(hits, total=len(ranked))
 

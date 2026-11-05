@@ -54,7 +54,7 @@ def test_app_env_lines_enable_langfuse() -> None:
     )
     assert lines == [
         "TRACING_BACKEND=langfuse",
-        "LANGFUSE_HOST=http://localhost:3000",
+        "LANGFUSE_HOST=http://127.0.0.1:3000",
         f"LANGFUSE_PUBLIC_KEY={PK}",
         f"LANGFUSE_SECRET_KEY={SK}",
     ]

@@ -19,6 +19,7 @@ DATA_DIR_ENV = "SENTINEL_FIXTURE_DATA_DIR"
 DEFAULT_DATA_DIR = Path(__file__).parent / "data"
 
 Limit = Annotated[int, Field(ge=1, le=50, description="Maximum number of results")]
+Offset = Annotated[int, Field(ge=0, description="Number of ranked results to skip (paging)")]
 
 READ = ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=False)
 WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=False)

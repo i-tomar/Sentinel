@@ -17,6 +17,7 @@ from servers.fixtures.common import (
     READ,
     WRITE,
     Limit,
+    Offset,
     load_jira,
     rank,
     results_json,
@@ -51,6 +52,7 @@ def create_server(issues: Sequence[JiraIssue] | None = None) -> MCPServer:
         label: str | None = None,
         blocked_by: str | None = None,
         limit: Limit = 20,
+        offset: Offset = 0,
     ) -> str:
         """Search issues by keywords plus optional exact filters.
 
@@ -83,7 +85,7 @@ def create_server(issues: Sequence[JiraIssue] | None = None) -> MCPServer:
                 blocked_by=i.blocked_by,
                 updated_at=i.updated_at,
             )
-            for i in ranked[:limit]
+            for i in ranked[offset : offset + limit]
         ]
         return results_json(hits, total=len(ranked))
 

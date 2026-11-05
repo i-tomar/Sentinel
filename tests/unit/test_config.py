@@ -100,7 +100,7 @@ def test_langfuse_enabled_through_configuration(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-x")
     s = Settings()
     assert s.tracing_backend == "langfuse"
-    assert s.langfuse_host == "http://localhost:3000"
+    assert s.langfuse_host == "http://127.0.0.1:3000"
 
 
 def test_secrets_are_masked_in_dumps(monkeypatch: pytest.MonkeyPatch) -> None:
