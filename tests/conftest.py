@@ -8,6 +8,12 @@ import pytest
 from sentinel.config import Settings, get_settings
 
 
+@pytest.fixture
+def anyio_backend() -> str:
+    """Async tests use anyio's pytest plugin (`@pytest.mark.anyio`), matching the MCP SDK."""
+    return "asyncio"
+
+
 @pytest.fixture(autouse=True)
 def isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     """Keep tests hermetic: no real `.env`, no inherited Sentinel env vars, fresh settings cache."""

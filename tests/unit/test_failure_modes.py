@@ -8,7 +8,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 from servers.fixtures import failure_modes as fm
 
-pytestmark = pytest.mark.unit
+pytestmark = [pytest.mark.unit, pytest.mark.anyio]
 
 
 def test_parse_spec() -> None:
