@@ -1,0 +1,55 @@
+name: infra
+
+# Boots the full docker-compose stack and runs the same health/auth checks as `make infra-check`.
+# Runs only when infrastructure files change, because the Langfuse stack takes minutes to pull.
+on:
+  pull_request:
+    paths:
+      - docker-compose.yml
+      - src/sentinel/infra.py
+      - src/sentinel/cli.py
+      - Makefile
+      - .github/workflows/infra.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: infra-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+
+      - name: Generate throwaway credentials
+        run: |
+          make infra-env
+          while IFS='=' read -r key value; do
+            case "$key" in ''|\#*) continue ;; esac
+            echo "::add-mask::$value"
+          done < .env.infra
+
+      - run: docker compose --env-file .env.infra config --quiet
+      - run: make up UP_TIMEOUT=420
+
+      - name: Enable Langfuse through configuration
+        run: uv run sentinel infra app-env >> "$GITHUB_ENV"
+
+      - run: make infra-check
+
+      - name: Service logs
+        if: failure()
+        run: docker compose --env-file .env.infra logs --tail 200
+
+      - name: Tear down (ephemeral runner)
+        if: always()
+        run: docker compose --env-file .env.infra down -v

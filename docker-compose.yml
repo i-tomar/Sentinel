@@ -1,0 +1,179 @@
+# Local infrastructure for Sentinel: Qdrant (vector store) + self-hosted Langfuse v4 (tracing).
+#
+# Credentials come from `.env.infra` (git-ignored), created by `uv run sentinel infra init`:
+#   docker compose --env-file .env.infra up -d --wait      (or: make up)
+# Every published port is bound to 127.0.0.1. `down` keeps volumes; `down -v` deletes all data.
+#
+# Langfuse services follow https://github.com/langfuse/langfuse/blob/main/docker-compose.yml,
+# trimmed to what tracing needs (no AI gateway / in-app agent) and with images pinned.
+
+name: sentinel
+
+x-langfuse-env: &langfuse-env
+  NEXTAUTH_URL: http://localhost:3000
+  DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:?run sentinel infra init}@postgres:5432/postgres
+  SALT: ${SALT:?run sentinel infra init}
+  ENCRYPTION_KEY: ${ENCRYPTION_KEY:?run sentinel infra init}
+  TELEMETRY_ENABLED: "false"
+  CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+  CLICKHOUSE_URL: http://clickhouse:8123
+  CLICKHOUSE_USER: clickhouse
+  CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?run sentinel infra init}
+  CLICKHOUSE_CLUSTER_ENABLED: "false"
+  LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+  LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+  LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?run sentinel infra init}
+  LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+  LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+  LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+  LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minio
+  LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?run sentinel infra init}
+  LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://localhost:9090
+  LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  REDIS_AUTH: ${REDIS_AUTH:?run sentinel infra init}
+  REDIS_TLS_ENABLED: "false"
+
+x-langfuse-depends-on: &langfuse-depends-on
+  postgres:
+    condition: service_healthy
+  minio:
+    condition: service_healthy
+  redis:
+    condition: service_healthy
+  clickhouse:
+    condition: service_healthy
+
+services:
+  qdrant:
+    image: docker.io/qdrant/qdrant:v1.20.0
+    restart: unless-stopped
+    ports:
+      - 127.0.0.1:6333:6333 # HTTP
+      - 127.0.0.1:6334:6334 # gRPC
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      # The image ships without curl/wget; bash's /dev/tcp is enough for a liveness probe.
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/6333 && printf \"GET /readyz HTTP/1.0\\r\\n\\r\\n\" >&3 && grep -q \"200 OK\" <&3'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  langfuse-web:
+    image: docker.io/langfuse/langfuse:4.76.0
+    restart: unless-stopped
+    depends_on: *langfuse-depends-on
+    ports:
+      - 127.0.0.1:3000:3000
+    environment:
+      <<: *langfuse-env
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?run sentinel infra init}
+      LANGFUSE_S3_MEDIA_UPLOAD_INTERNAL_ENDPOINT: http://minio:9000
+      LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID:?run sentinel infra init}
+      LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME:?run sentinel infra init}
+      LANGFUSE_INIT_PROJECT_ID: ${LANGFUSE_INIT_PROJECT_ID:?run sentinel infra init}
+      LANGFUSE_INIT_PROJECT_NAME: ${LANGFUSE_INIT_PROJECT_NAME:?run sentinel infra init}
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY:?run sentinel infra init}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY:?run sentinel infra init}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL:?run sentinel infra init}
+      LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER_NAME:?run sentinel infra init}
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:?run sentinel infra init}
+      AUTH_DISABLE_SIGNUP: "true"
+    healthcheck:
+      # Next.js listens on the container hostname, not 127.0.0.1.
+      test: ["CMD-SHELL", "wget -qO- http://$$HOSTNAME:3000/api/public/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 20s
+
+  langfuse-worker:
+    image: docker.io/langfuse/langfuse-worker:4.76.0
+    restart: unless-stopped
+    depends_on: *langfuse-depends-on
+    environment:
+      <<: *langfuse-env
+
+  clickhouse:
+    image: docker.io/clickhouse/clickhouse-server:26.3.62.3
+    restart: unless-stopped
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?run sentinel infra init}
+    volumes:
+      - langfuse_clickhouse_data:/var/lib/clickhouse
+      - langfuse_clickhouse_logs:/var/log/clickhouse-server
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 1s
+
+  minio:
+    # Chainguard's free tier only publishes :latest, so pin the digest.
+    image: cgr.dev/chainguard/minio:latest@sha256:cee9a8e35885e93f14b3cb32960e5017aff74e2adfb52ba87c65003b0163886b
+    restart: unless-stopped
+    entrypoint: sh
+    # Create the 'langfuse' bucket before starting the server.
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?run sentinel infra init}
+    ports:
+      - 127.0.0.1:9090:9000 # S3 API (SDK media uploads use presigned URLs on this port)
+    volumes:
+      - langfuse_minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+      start_period: 1s
+
+  redis:
+    image: docker.io/redis:7.4.12
+    restart: unless-stopped
+    command: --requirepass ${REDIS_AUTH:?run sentinel infra init} --maxmemory-policy noeviction
+    volumes:
+      - langfuse_redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+      interval: 3s
+      timeout: 10s
+      retries: 10
+    environment:
+      REDIS_PASSWORD: ${REDIS_AUTH:?run sentinel infra init}
+
+  postgres:
+    image: docker.io/postgres:17.11
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run sentinel infra init}
+      POSTGRES_DB: postgres
+      TZ: UTC
+      PGTZ: UTC
+    volumes:
+      - langfuse_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  qdrant_data:
+  langfuse_postgres_data:
+  langfuse_clickhouse_data:
+  langfuse_clickhouse_logs:
+  langfuse_minio_data:
+  langfuse_redis_data:

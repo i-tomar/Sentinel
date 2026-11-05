@@ -1,8 +1,11 @@
 .DEFAULT_GOAL := help
-.PHONY: help sync lint fmt typecheck test check fixtures fixtures-check up down ingest ask chat serve eval eval-fast baseline
+.PHONY: help sync lint fmt typecheck test check fixtures fixtures-check infra-env up up-qdrant down ps logs infra-check ingest ask chat serve eval eval-fast baseline
 
 UV ?= uv
+COMPOSE ?= docker compose --env-file .env.infra
+UP_TIMEOUT ?= 300
 Q ?=
+S ?=
 
 help: ## List targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-12s %s\n", $$1, $$2}'
@@ -33,13 +36,33 @@ fixtures: ## Regenerate deterministic fixture data (servers/fixtures/data)
 fixtures-check: ## Fail if committed fixture data is out of date
 	$(UV) run python -m servers.fixtures.generate --check
 
+# --- Local infrastructure (docker-compose.yml) --------------------------------
+# No target deletes volumes; see README for `down -v`.
+
+.env.infra:
+	$(UV) run sentinel infra init
+
+infra-env: .env.infra ## Generate .env.infra (random local credentials) if missing
+
+up: .env.infra ## Start Qdrant + Langfuse and wait until healthy
+	$(COMPOSE) up -d --wait --wait-timeout $(UP_TIMEOUT)
+
+up-qdrant: .env.infra ## Start only Qdrant
+	$(COMPOSE) up -d --wait qdrant
+
+down: ## Stop services (keeps data volumes)
+	$(COMPOSE) down
+
+ps: ## Service status
+	$(COMPOSE) ps
+
+logs: ## Follow logs: make logs S=langfuse-web
+	$(COMPOSE) logs -f --tail 100 $(S)
+
+infra-check: ## Check Qdrant/Langfuse health and Langfuse keys
+	$(UV) run sentinel infra check --wait 60
+
 # --- Targets below are wired up in later build steps -------------------------
-
-up: ## docker compose up (Qdrant + Langfuse)            [step c]
-	@echo "not implemented yet: lands in Phase 1 step c" && exit 1
-
-down: ## docker compose down (keeps volumes)            [step c]
-	@echo "not implemented yet: lands in Phase 1 step c" && exit 1
 
 ingest: ## Ingest fixture (or live) data into Qdrant     [step d]
 	@echo "not implemented yet: lands in Phase 1 step d" && exit 1
