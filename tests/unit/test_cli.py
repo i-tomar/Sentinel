@@ -48,6 +48,23 @@ def test_infra_check_reports_failures(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "FAIL qdrant" in result.stdout
 
 
+def test_ingest_refuses_live_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATA_MODE", "live")
+    result = runner.invoke(app, ["ingest"])
+    assert result.exit_code == 2
+    assert "step (i)" in result.output
+
+
+def test_search_rejects_unknown_source_and_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "hash")
+    monkeypatch.setenv("QDRANT_URL", ":memory:")
+    assert runner.invoke(app, ["search", "x", "-s", "slack"]).exit_code != 0
+    assert runner.invoke(app, ["search", "x", "--mode", "fuzzy"]).exit_code != 0
+    empty = runner.invoke(app, ["search", "x"])
+    assert empty.exit_code == 0
+    assert "no results" in empty.stdout
+
+
 def test_config_prints_json_with_masked_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NOTION_TOKEN", "secret_notion_token")
     result = runner.invoke(app, ["config"])

@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help sync lint fmt typecheck test check fixtures fixtures-check infra-env up up-qdrant down ps logs infra-check ingest ask chat serve eval eval-fast baseline
+.PHONY: help sync lint fmt typecheck test check fixtures fixtures-check infra-env up up-qdrant down ps logs infra-check ingest search ask chat serve eval eval-fast baseline
 
 UV ?= uv
 COMPOSE ?= docker compose --env-file .env.infra
@@ -64,8 +64,11 @@ infra-check: ## Check Qdrant/Langfuse health and Langfuse keys
 
 # --- Targets below are wired up in later build steps -------------------------
 
-ingest: ## Ingest fixture (or live) data into Qdrant     [step d]
-	@echo "not implemented yet: lands in Phase 1 step d" && exit 1
+ingest: ## Sync fixture records (over MCP) into Qdrant; idempotent
+	$(UV) run sentinel ingest
+
+search: ## Debug retrieval: make search Q="auth migration owner"
+	$(UV) run sentinel search "$(Q)"
 
 ask: ## Ask one question: make ask Q="..."              [step e]
 	@echo "not implemented yet: lands in Phase 1 step e" && exit 1
