@@ -73,6 +73,46 @@ class GmailThread(_Record):
     messages: tuple[GmailMessage, ...]
 
 
+class PageHit(_Record):
+    id: str
+    title: str
+    url: str
+    owner: str
+    updated_at: datetime
+    snippet: str
+
+
+class IssueHit(_Record):
+    key: str
+    url: str
+    summary: str
+    status: IssueStatus
+    priority: Priority
+    assignee: str | None
+    blocked_by: tuple[str, ...]
+    updated_at: datetime
+
+
+class ThreadHit(_Record):
+    id: str
+    url: str
+    subject: str
+    participants: tuple[str, ...]
+    labels: tuple[str, ...]
+    message_count: int
+    last_message_at: datetime
+    snippet: str
+
+
+class Draft(_Record):
+    draft_id: str
+    to: tuple[str, ...]
+    subject: str
+    body: str
+    thread_id: str | None
+    created_at: datetime
+
+
 InjectionTechnique = Literal[
     "email_body",
     "page_footer",
