@@ -50,6 +50,41 @@ The first `make up` pulls ~2 GB of images. Langfuse needs a few GB of RAM.
 > vectors). Regenerating `.env.infra` with `--force` also makes existing volumes unusable,
 > because the stored passwords no longer match. Do either only if you mean to wipe local data.
 
+## Ingestion and retrieval
+
+`sentinel ingest` reads every record through the source MCP tools (in fixture mode it starts the
+fixture servers as stdio subprocesses). It turns each record into a `Document` with source, id,
+url, title, text, `updated_at` from the source and `fetched_at`, and syncs the chunks into
+Qdrant:
+
+- Unchanged records are skipped; only their `fetched_at` is refreshed.
+- Changed records have all their chunks replaced.
+- Records that disappeared from the source are deleted.
+- A source whose tools fail is reported, and its existing index is left untouched.
+
+```bash
+make ingest                                   # or: uv run sentinel ingest [-s notion -s jira]
+make search Q="who owns the auth migration?"  # or: uv run sentinel search "..." -k 5 --mode hybrid
+```
+
+- **Hybrid search.** Dense vectors and keyword vectors (saturated term frequency, with IDF
+  applied by Qdrant) are fused with reciprocal rank fusion. A third list matches record IDs
+  named in the query, so `PROJ-142` returns the ticket itself first.
+- **Embeddings.** `EMBEDDING_PROVIDER=local` (default) uses fastembed `BAAI/bge-small-en-v1.5`,
+  downloaded once with no API key. `hash` is an offline, deterministic lexical stand-in for
+  tests and CI. Each embedder gets its own collection (`<QDRANT_COLLECTION>_<embedder>`).
+- **Storage.** `QDRANT_URL` can be the compose server (`http://127.0.0.1:6333`), `:memory:`, or
+  a directory for embedded on-disk Qdrant (no Docker).
+- **Citations.** `[n]` numbers records, not chunks, and renders source, title, id, url, and
+  updated/fetched times. Markers that don't match retrieved evidence are flagged.
+- **Kept out of the index.** Fixture ground truth (`manifest.json`) and eval data are never
+  indexed. The test suite checks this.
+- **Untrusted content.** Indexed content is untrusted. Poisoned fixture records are indexed as
+  they are, and filtering them is the job of the retrieved-content guard (Phase 3).
+
+Opt-in tests: `SENTINEL_TEST_QDRANT_URL=http://127.0.0.1:6333` (real Qdrant server, throwaway
+collection) and `SENTINEL_TEST_FASTEMBED=1` (downloads the local model).
+
 ## Fixture MCP servers
 
 CI and local development use fake Notion, Jira and Gmail MCP servers over a seeded "Acme"
