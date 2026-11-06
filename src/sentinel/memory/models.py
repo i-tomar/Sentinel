@@ -12,6 +12,7 @@ from sentinel.retrieval.embed import keyword_tokens
 from sentinel.text import STOPWORDS
 
 MEMORY_KEY_PATTERN = r"^[a-z0-9][a-z0-9._-]{0,99}$"
+MEMORY_VALUE_MAX = 500
 MEMORY_SOURCE_PATTERN = r"^(?:(?:notion|jira|gmail):[\w.-]{1,100}|user|mcp|agent)$"
 """A record key the fact was taken from, or who asserted it (user, mcp client, agent)."""
 
@@ -22,7 +23,7 @@ class MemoryItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     key: str = Field(pattern=MEMORY_KEY_PATTERN)
-    value: str = Field(min_length=1, max_length=500)
+    value: str = Field(min_length=1, max_length=MEMORY_VALUE_MAX)
     source: str = Field(pattern=MEMORY_SOURCE_PATTERN)
     verified: bool = False
     """True only when the agent checked the value against its source record."""

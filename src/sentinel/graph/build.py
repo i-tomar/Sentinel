@@ -1,11 +1,13 @@
 """Graph wiring.
 
-START -> plan -> route -> execute_tools -> retrieve -> verify -+-> route (next hop)
-                                                               +-> answer -> citation_check -> END
+START -> load_memory -> plan -> route -> execute_tools -> retrieve -> retrieved_guard -> verify
+    verify -+-> route (next hop)
+            +-> answer -> citation_check -> save_memory -> record_turn -> END
 
 One span per node and per tool call. The plan is fixed by the planner from the user question;
 the loop can only route sub-questions already in it (or widen an empty search to the other
-allowed sources), bounded by `max_hops`.
+allowed sources), bounded by `max_hops`. Tool results, index chunks and recalled memory are
+scanned for injected instructions before routing, the verifier or the answerer can read them.
 """
 
 from __future__ import annotations
@@ -33,6 +35,12 @@ from sentinel.graph.nodes.citation_check import check_answer
 from sentinel.graph.nodes.execute_tools import ToolExecutor, execute_calls
 from sentinel.graph.nodes.planner import Planner, RulePlanner
 from sentinel.graph.nodes.retrieve import assemble_evidence, relevant_chunks
+from sentinel.graph.nodes.retrieved_guard import (
+    guard_all,
+    guard_memory,
+    merge_notes,
+    recheck_relevance,
+)
 from sentinel.graph.nodes.save_memory import (
     apply_writes,
     fact_from_answer,
@@ -50,6 +58,7 @@ from sentinel.graph.nodes.verifier import find_stale, superseded_by
 from sentinel.graph.state import (
     AgentState,
     CitationReport,
+    GuardNote,
     SubQuestion,
     TokenUsage,
     ToolCall,
@@ -57,6 +66,8 @@ from sentinel.graph.state import (
     TurnRecord,
     new_turn_input,
 )
+from sentinel.guards.injection import InjectionDetector
+from sentinel.guards.sanitize import GuardMode
 from sentinel.memory.backend import MemoryBackend
 from sentinel.memory.freshness import find_conflicts
 from sentinel.memory.models import MemoryItem, MemoryWrite
@@ -94,6 +105,9 @@ class Deps:
     data_mode: Literal["fixture", "live"] = "fixture"
     memory_auto_approve: bool = False
     """Write memory without approval; only honoured with fixture data (see memory.policy)."""
+    injection_detector: InjectionDetector | None = field(default_factory=InjectionDetector)
+    """Retrieved-content guard. None disables it (only for experiments and eval baselines)."""
+    guard_mode: GuardMode = "remove"
 
 
 def _model_name(llm: BaseChatModel) -> str:
@@ -102,6 +116,14 @@ def _model_name(llm: BaseChatModel) -> str:
         if isinstance(value, str) and value:
             return value
     return llm._llm_type
+
+
+def _guarded(notes: Sequence[GuardNote]) -> dict[str, int]:
+    """Record key -> number of neutralized spans (summed over chunks and hops)."""
+    counts: dict[str, int] = {}
+    for note in notes:
+        counts[note.key] = counts.get(note.key, 0) + note.spans
+    return counts
 
 
 def _usage(reply: object) -> TokenUsage:
@@ -125,10 +147,14 @@ def build_graph(deps: Deps) -> Any:
         if deps.memory is None:
             return {"memory_notes": []}
         notes = deps.memory.search(state.question, MEMORY_NOTES)
+        flagged: list[GuardNote] = []
+        if deps.injection_detector is not None:
+            notes, flagged = guard_memory(notes, deps.injection_detector, deps.guard_mode)
         with deps.tracer.start_as_current_span("memory.load") as span:
             span.set_attribute("sentinel.memory.keys", [n.key for n in notes])
             span.set_attribute("sentinel.memory.verified", sum(n.verified for n in notes))
-        return {"memory_notes": notes}
+            span.set_attribute("sentinel.guard.flagged", [n.key for n in flagged])
+        return {"memory_notes": notes, "guard_notes": merge_notes(state.guard_notes, flagged)}
 
     async def plan(state: AgentState) -> dict[str, Any]:
         context = context_from(state.turns, state.documents)
@@ -221,6 +247,33 @@ def build_graph(deps: Deps) -> Any:
                     chunks.append(chunk)
         return {"index_chunks": chunks, "candidates": candidates}
 
+    async def retrieved_guard(state: AgentState) -> dict[str, Any]:
+        if deps.injection_detector is None:
+            return {}
+        documents, chunks, notes = guard_all(
+            state.documents, state.index_chunks, deps.injection_detector, deps.guard_mode
+        )
+        all_notes = merge_notes(state.guard_notes, notes)
+        queries: dict[str, list[str]] = {}
+        for call in state.tool_calls:
+            query = call.args.get("query")
+            if call.hop == state.hops and isinstance(query, str) and query:
+                queries.setdefault(call.sub_question_id, []).append(query)
+        sq_docs, dropped = recheck_relevance(
+            state.sq_docs, documents, queries, {n.key for n in all_notes}
+        )
+        with deps.tracer.start_as_current_span("guard.retrieved") as span:
+            span.set_attribute("sentinel.guard.scanned", len(documents) + len(chunks))
+            span.set_attribute("sentinel.guard.flagged", [n.key for n in notes])
+            span.set_attribute("sentinel.guard.rules", sorted({r for n in notes for r in n.rules}))
+            span.set_attribute("sentinel.guard.dropped", dropped)
+        return {
+            "documents": documents,
+            "index_chunks": chunks,
+            "sq_docs": sq_docs,
+            "guard_notes": all_notes,
+        }
+
     async def verify(state: AgentState) -> dict[str, Any]:
         done = list(dict.fromkeys([*state.done, *state.current]))
         stale = find_stale([*state.documents.values(), *state.index_chunks])
@@ -270,6 +323,7 @@ def build_graph(deps: Deps) -> Any:
             state.index_chunks,
             state.stale_keys,
             extra_buckets=[MEMORY_BUCKET],
+            guarded=_guarded(state.guard_notes),
         )
         if not evidence:
             draft = insufficient_answer(
@@ -350,6 +404,7 @@ def build_graph(deps: Deps) -> Any:
         ("route", route_node),
         ("execute_tools", execute),
         ("retrieve", retrieve),
+        ("retrieved_guard", retrieved_guard),
         ("verify", verify),
         ("answer", answer),
         ("citation_check", citation_check),
@@ -362,7 +417,8 @@ def build_graph(deps: Deps) -> Any:
     graph.add_edge("plan", "route")
     graph.add_edge("route", "execute_tools")
     graph.add_edge("execute_tools", "retrieve")
-    graph.add_edge("retrieve", "verify")
+    graph.add_edge("retrieve", "retrieved_guard")
+    graph.add_edge("retrieved_guard", "verify")
     graph.add_conditional_edges(
         "verify", lambda s: s.next_step, {"route": "route", "answer": "answer"}
     )
@@ -388,6 +444,8 @@ class AskResult(BaseModel):
     failures: list[ToolFailure]
     stale_keys: list[str]
     errors: list[str]
+    guard_notes: list[GuardNote]
+    """Retrieved records in which suspected injected instructions were neutralized."""
     thread_id: str | None
     """Set when a checkpointer is configured; pass it back to continue the conversation."""
     turn: int
@@ -451,6 +509,7 @@ async def ask_async(
         failures=state.failures,
         stale_keys=state.stale_keys,
         errors=state.errors,
+        guard_notes=state.guard_notes,
         thread_id=thread_id,
         turn=len(state.turns),
         memory_notes=state.memory_notes,

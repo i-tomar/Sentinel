@@ -6,6 +6,7 @@ from collections.abc import Iterable, Mapping, Sequence
 
 from sentinel.citations import CitationResolver
 from sentinel.graph.state import Evidence, SubQuestion
+from sentinel.guards.sanitize import mask_neutralized
 from sentinel.retrieval.models import Chunk, Document, SearchHit
 from sentinel.text import content_tokens
 
@@ -15,8 +16,10 @@ MAX_EVIDENCE_CHARS = 1500
 
 def is_relevant(question: str, chunk: Chunk) -> bool:
     """Dense search always returns *something*; keep a chunk only if it shares at least one
-    content word with the question. Crude, but it lets the agent say "no evidence" honestly."""
-    return bool(content_tokens(question) & content_tokens(f"{chunk.title}\n{chunk.text}"))
+    content word with the question. Crude, but it lets the agent say "no evidence" honestly.
+    Words inside text the guard quoted as untrusted do not count."""
+    visible = mask_neutralized(f"{chunk.title}\n{chunk.text}")
+    return bool(content_tokens(question) & content_tokens(visible))
 
 
 def relevant_chunks(question: str, hits: Sequence[SearchHit]) -> list[Chunk]:
@@ -32,6 +35,7 @@ def assemble_evidence(
     stale_keys: Iterable[str],
     *,
     extra_buckets: Sequence[str] = (),
+    guarded: Mapping[str, int] | None = None,
     max_items: int = MAX_EVIDENCE,
     max_chars: int = MAX_EVIDENCE_CHARS,
 ) -> list[Evidence]:
@@ -53,7 +57,13 @@ def assemble_evidence(
         citation = resolver.resolve(n)
         if citation is None:  # cannot happen: n was just issued by the resolver
             raise RuntimeError(f"citation {n} vanished")
-        items[n] = Evidence(citation=citation, text=text[:max_chars], score=1.0, stale=key in stale)
+        items[n] = Evidence(
+            citation=citation,
+            text=text[:max_chars],
+            score=1.0,
+            stale=key in stale,
+            untrusted_removed=(guarded or {}).get(key, 0),
+        )
 
     for bucket in [*(sq.id for sq in plan), *extra_buckets]:
         for key in sq_docs.get(bucket, []):

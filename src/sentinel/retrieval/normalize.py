@@ -6,12 +6,34 @@ Live connectors (step i) will add their own normalizers that produce the same `D
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
 from sentinel.retrieval.models import Document
+
+FIELD_LABELS = (
+    "Status",
+    "Priority",
+    "Assignee",
+    "Reporter",
+    "Blocked by",
+    "Linked pages",
+    "Comments",
+    "From",
+    "To",
+    "Cc",
+    "Date",
+)
+_FIELD_LABEL = re.compile(r"\b(?:" + "|".join(map(re.escape, FIELD_LABELS)) + r"):")
+
+
+def strip_field_labels(text: str) -> str:
+    """Drop the field labels the normalizers add ("Status:", "From:"...). Every record has
+    them, so they say nothing about whether a record matches a query."""
+    return _FIELD_LABEL.sub(" ", text)
 
 
 class _Wire(BaseModel):

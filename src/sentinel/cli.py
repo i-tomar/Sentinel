@@ -24,6 +24,7 @@ from sentinel.graph.build import AskResult, Deps, ask_async, thread_turns
 from sentinel.graph.checkpoint import open_checkpointer
 from sentinel.graph.nodes.execute_tools import MCPToolExecutor
 from sentinel.graph.nodes.planner import make_planner
+from sentinel.guards.injection import InjectionDetector
 from sentinel.live.gmail import API as GMAIL_API
 from sentinel.live.gmail import READONLY_SCOPE
 from sentinel.live.gmail import TOKEN_URL as GMAIL_TOKEN_URL
@@ -291,6 +292,8 @@ def _agent_deps(
         memory=memory,
         data_mode=settings.data_mode,
         memory_auto_approve=auto_approve,
+        injection_detector=InjectionDetector(threshold=settings.injection_threshold),
+        guard_mode=settings.retrieved_guard_mode,
     )
 
 
@@ -319,6 +322,11 @@ def _print_result(result: AskResult, settings: Settings) -> None:
         typer.echo(f"  {sq.id} [{sq.relation} -> {','.join(sq.target_sources)}] {sq.text}{mark}")
     for failure in result.failures:
         typer.echo(f"  tool failure: {failure.source}.{failure.tool}: {failure.error}")
+    for guard in result.guard_notes:
+        typer.echo(
+            f"  guard: {guard.action} {guard.spans} suspected instruction(s) from {guard.key} "
+            f"({', '.join(guard.rules)})"
+        )
     for note in result.memory_notes:
         state = "stale" if note.stale else ("verified" if note.verified else "unverified")
         typer.echo(f"  memory note [{state}] {note.key} (source {note.source})")

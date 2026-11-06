@@ -20,6 +20,7 @@ from sentinel.citations import Citation
 from sentinel.graph.state import (
     CitationReport,
     Evidence,
+    GuardNote,
     SubQuestion,
     TokenUsage,
     ToolCall,
@@ -36,6 +37,7 @@ STATE_MODELS: tuple[type[BaseModel], ...] = (
     CitationReport,
     Document,
     Evidence,
+    GuardNote,
     MemoryItem,
     MemoryWrite,
     SubQuestion,
