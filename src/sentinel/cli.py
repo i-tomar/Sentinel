@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
@@ -14,7 +15,9 @@ import typer
 from sentinel import __version__, infra
 from sentinel.citations import CitationResolver
 from sentinel.config import get_settings
-from sentinel.graph.build import Deps, ask
+from sentinel.graph.build import AskResult, Deps, ask_async
+from sentinel.graph.nodes.execute_tools import MCPToolExecutor
+from sentinel.graph.nodes.planner import make_planner
 from sentinel.llm import make_chat_model
 from sentinel.mcp_clients.pool import open_clients
 from sentinel.retrieval.embed import make_embedder
@@ -127,17 +130,44 @@ def ask_command(
     source: SourceOption = None,
     k: Annotated[int, typer.Option("-k", min=1, max=20, help="Chunks to retrieve.")] = 6,
     as_json: Annotated[bool, typer.Option("--json", help="Print the full result as JSON.")] = False,
+    tools: Annotated[
+        bool, typer.Option(help="Call source MCP tools live (fixture servers by default).")
+    ] = True,
+    as_of: Annotated[
+        datetime | None,
+        typer.Option(formats=["%Y-%m-%d"], help="Date treated as today, e.g. for 'last week'."),
+    ] = None,
 ) -> None:
-    """Answer a question from indexed evidence, with citations and a trace id."""
+    """Plan, call tools over several hops, and answer with citations and a trace id."""
     settings = get_settings()
+    sources = _sources(source)
+    if tools and settings.data_mode == "live":
+        typer.echo("DATA_MODE=live connectors arrive in step (i); use --no-tools.", err=True)
+        raise typer.Exit(2)
+    today = as_of.replace(tzinfo=UTC) if as_of else None
     provider = build_tracer_provider(settings)
+    llm = make_chat_model(settings)
+
+    async def run(store: ChunkStore) -> AskResult:
+        deps = Deps(
+            store=store,
+            llm=llm,
+            tracer=get_tracer(provider),
+            planner=make_planner(settings.llm_provider, llm),
+            k=k,
+            max_hops=settings.max_hops,
+            tool_timeout_s=settings.tool_timeout_s,
+        )
+        if not tools:
+            return await ask_async(question, deps, sources, today)
+        async with open_clients(settings, sources) as clients:
+            deps.tools = MCPToolExecutor(clients, settings.tool_timeout_s)
+            return await ask_async(question, deps, sources, today)
+
     try:
         with _open_store() as store:
             store.ensure_collection()
-            deps = Deps(
-                store=store, llm=make_chat_model(settings), tracer=get_tracer(provider), k=k
-            )
-            result = ask(question, deps, _sources(source))
+            result = anyio.run(run, store)
     finally:
         provider.shutdown()  # flushes spans to the tracing backend, if any
     if as_json:
@@ -148,13 +178,20 @@ def ask_command(
         typer.echo("\nSources:")
         for citation in result.citations:
             typer.echo(citation.render())
+    typer.echo("\nPlan:")
+    for sq in result.plan:
+        mark = " (unanswered)" if sq.id in result.unanswered else ""
+        typer.echo(f"  {sq.id} [{sq.relation} -> {','.join(sq.target_sources)}] {sq.text}{mark}")
+    for failure in result.failures:
+        typer.echo(f"  tool failure: {failure.source}.{failure.tool}: {failure.error}")
     if not result.citation_report.ok:
         typer.echo(f"\ncitation check: {result.citation_report.model_dump_json()}")
     usage = result.token_usage
     typer.echo(
-        f"\ntrace_id={result.trace_id} latency_ms={result.latency_ms} "
-        f"tokens_in={usage.input_tokens} tokens_out={usage.output_tokens} "
-        f"tracing={settings.tracing_backend} llm={settings.llm_provider}"
+        f"\ntrace_id={result.trace_id} hops={result.hops} tool_calls={len(result.tool_calls)} "
+        f"latency_ms={result.latency_ms} tokens_in={usage.input_tokens} "
+        f"tokens_out={usage.output_tokens} tracing={settings.tracing_backend} "
+        f"llm={settings.llm_provider}"
     )
 
 

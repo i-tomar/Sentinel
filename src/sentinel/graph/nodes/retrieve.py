@@ -1,33 +1,67 @@
-"""Hybrid search, then a lexical relevance gate, then citation numbering per record."""
+"""Index retrieval with a lexical relevance gate, and evidence assembly for the answerer."""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Mapping, Sequence
 
 from sentinel.citations import CitationResolver
-from sentinel.graph.state import Evidence
-from sentinel.retrieval.models import SearchHit
+from sentinel.graph.state import Evidence, SubQuestion
+from sentinel.retrieval.models import Chunk, Document, SearchHit
 from sentinel.text import content_tokens
 
+MAX_EVIDENCE = 12
+MAX_EVIDENCE_CHARS = 1500
 
-def is_relevant(question: str, hit: SearchHit) -> bool:
-    """Dense search always returns *something*; keep a hit only if it shares at least one
+
+def is_relevant(question: str, chunk: Chunk) -> bool:
+    """Dense search always returns *something*; keep a chunk only if it shares at least one
     content word with the question. Crude, but it lets the agent say "no evidence" honestly."""
-    return bool(content_tokens(question) & content_tokens(f"{hit.chunk.title}\n{hit.chunk.text}"))
+    return bool(content_tokens(question) & content_tokens(f"{chunk.title}\n{chunk.text}"))
 
 
-def build_evidence(question: str, hits: Sequence[SearchHit]) -> list[Evidence]:
+def relevant_chunks(question: str, hits: Sequence[SearchHit]) -> list[Chunk]:
+    return [h.chunk for h in hits if is_relevant(question, h.chunk)]
+
+
+def assemble_evidence(
+    question: str,
+    plan: Sequence[SubQuestion],
+    documents: Mapping[str, Document],
+    sq_docs: Mapping[str, Sequence[str]],
+    index_chunks: Iterable[Chunk],
+    stale_keys: Iterable[str],
+    *,
+    max_items: int = MAX_EVIDENCE,
+    max_chars: int = MAX_EVIDENCE_CHARS,
+) -> list[Evidence]:
+    """Records fetched by tools come first, in plan order (fresh data, targeted lookups);
+    then relevant index chunks. One numbered evidence item per record."""
+    stale = set(stale_keys)
     resolver = CitationResolver()
-    merged: dict[int, Evidence] = {}
-    for hit in hits:
-        if not is_relevant(question, hit):
+    items: dict[int, Evidence] = {}
+
+    def put(n: int, key: str, text: str) -> None:
+        if n in items:
+            if len(items[n].text) < max_chars:
+                merged = f"{items[n].text}\n...\n{text}"[:max_chars]
+                items[n] = items[n].model_copy(update={"text": merged})
+            return
+        if len(items) >= max_items:
+            return
+        citation = resolver.resolve(n)
+        if citation is None:  # cannot happen: n was just issued by the resolver
+            raise RuntimeError(f"citation {n} vanished")
+        items[n] = Evidence(citation=citation, text=text[:max_chars], score=1.0, stale=key in stale)
+
+    for sq in plan:
+        for key in sq_docs.get(sq.id, []):
+            doc = documents.get(key)
+            if doc is not None and len(items) < max_items:
+                put(resolver.add_document(doc).n, key, doc.text)
+    for chunk in index_chunks:
+        if not is_relevant(question, chunk):
             continue
-        citation = resolver.add(hit.chunk)
-        if citation.n in merged:
-            prev = merged[citation.n]
-            merged[citation.n] = prev.model_copy(
-                update={"text": f"{prev.text}\n...\n{hit.chunk.text}"}
-            )
-        else:
-            merged[citation.n] = Evidence(citation=citation, text=hit.chunk.text, score=hit.score)
-    return [merged[n] for n in sorted(merged)]
+        if len(items) >= max_items and resolver.resolve_key(chunk.doc_key) is None:
+            continue
+        put(resolver.add(chunk).n, chunk.doc_key, chunk.text)
+    return [items[n] for n in sorted(items)]

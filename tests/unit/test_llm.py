@@ -41,6 +41,32 @@ def test_extractive_answer_cites_only_prompt_evidence() -> None:
     assert "[2]" not in answer
 
 
+def test_extractive_answer_skips_stale_evidence_and_spreads_sources() -> None:
+    prompt = """Question: Who owns the auth migration?
+
+Evidence:
+<evidence n="1" source="notion" id="v2" title="Plan v2" updated="2026-10-27">
+Auth migration owner: Priya Sharma.
+</evidence>
+
+<evidence n="2" source="notion" id="v1" title="Plan v1" updated="2026-07-05" stale="true">
+Auth migration owner: Vikram Rao.
+</evidence>
+
+<evidence n="3" source="notion" id="x" title="Other" updated="2026-10-01">
+Auth migration owner listed in the OKRs as Priya.
+</evidence>
+
+<evidence n="4" source="gmail" id="thr" title="Status" updated="2026-10-28">
+I own the auth migration now.
+</evidence>"""
+    answer = extractive_answer(prompt, max_blocks=2)
+    assert "Vikram" not in answer  # stale block never quoted
+    assert "[2]" not in answer
+    assert "[4]" in answer  # gmail represented even though notion block 3 scores higher
+    assert "[1]" in answer
+
+
 def test_extractive_answer_without_overlap_is_insufficient() -> None:
     no_match = PROMPT.replace("Who owns the auth migration plan?", "Capital of France?")
     assert extractive_answer(no_match).startswith(INSUFFICIENT_PREFIX)

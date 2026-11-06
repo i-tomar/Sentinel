@@ -22,9 +22,13 @@ from sentinel.text import content_tokens, split_sentences
 
 LLM_TIMEOUT_S = 60.0
 INSUFFICIENT_PREFIX = "I don't have enough evidence"
+PARTIAL_PREFIX = "I could not read"
+"""Start of a sentence admitting a source was unavailable (not a factual claim, needs no [n])."""
 
-_EVIDENCE = re.compile(r'<evidence n="(\d+)"[^>]*>\n(.*?)\n</evidence>', re.DOTALL)
+_EVIDENCE = re.compile(r'<evidence n="(\d+)"([^>]*)>\n(.*?)\n</evidence>', re.DOTALL)
+_SOURCE_ATTR = re.compile(r'source="(\w+)"')
 _QUESTION = re.compile(r"^Question: (.*)$", re.MULTILINE)
+_FAILED_SOURCE = re.compile(r"^- (\w+) \([\w.]+\) failed after", re.MULTILINE)
 
 
 def prompt_hash(messages: Sequence[BaseMessage]) -> str:
@@ -33,22 +37,40 @@ def prompt_hash(messages: Sequence[BaseMessage]) -> str:
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()
 
 
-def extractive_answer(prompt: str, max_sentences: int = 2) -> str:
-    """What MockLLM says when unscripted: the evidence sentences that best overlap the question,
-    each cited with its evidence number. Never cites a number absent from the prompt."""
+def extractive_answer(prompt: str, max_blocks: int = 5) -> str:
+    """What MockLLM says when unscripted: from each non-stale evidence block, the sentence that
+    best overlaps the question while adding at least one word the question lacks, cited with
+    that block's number. The best block of each source is taken first, then the best of the
+    rest, up to `max_blocks`. Never cites a number absent from the prompt. Mentions
+    unreadable sources."""
     question = _QUESTION.search(prompt)
     wanted = content_tokens(question.group(1)) if question else set()
-    scored: list[tuple[int, int, str]] = []
-    for n, body in _EVIDENCE.findall(prompt):
-        for sentence in split_sentences(body):
-            overlap = len(wanted & content_tokens(sentence))
-            if overlap:
-                scored.append((overlap, int(n), sentence.lstrip("#-* ").rstrip(".")))
-    if not scored:
-        return f"{INSUFFICIENT_PREFIX} to answer this from the retrieved sources."
-    scored.sort(key=lambda s: (-s[0], s[1]))
-    picked = scored[:max_sentences]
-    return " ".join(f"{sentence} [{n}]." for _, n, sentence in picked)
+    best: list[tuple[int, int, str, str]] = []
+    for n, attrs, body in _EVIDENCE.findall(prompt):
+        if 'stale="true"' in attrs:
+            continue
+        scored = []
+        for raw in split_sentences(body):
+            words = content_tokens(raw)
+            sentence = raw.lstrip("#-* ").rstrip(".")
+            if sentence and wanted & words and words - wanted:
+                scored.append((len(wanted & words), sentence))
+        if scored:
+            overlap, sentence = max(scored, key=lambda s: s[0])
+            source = _SOURCE_ATTR.search(attrs)
+            best.append((overlap, int(n), source.group(1) if source else "", sentence))
+    failed = sorted(set(_FAILED_SOURCE.findall(prompt)))
+    note = f" {PARTIAL_PREFIX} {', '.join(failed)}, so this may be incomplete." if failed else ""
+    if not best:
+        return f"{INSUFFICIENT_PREFIX} to answer this from the retrieved sources.{note}"
+    best.sort(key=lambda s: (-s[0], s[1]))
+    picked: list[tuple[int, int, str, str]] = []
+    for item in best:  # one per source first, so multi-source evidence shows up
+        if item[2] not in {p[2] for p in picked}:
+            picked.append(item)
+    picked += [item for item in best if item not in picked]
+    chosen = sorted(picked[:max_blocks], key=lambda s: s[1])
+    return " ".join(f"{sentence} [{n}]." for _, n, _, sentence in chosen) + note
 
 
 class MockLLM(BaseChatModel):
