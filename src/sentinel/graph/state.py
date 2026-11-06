@@ -112,6 +112,14 @@ class GuardNote(BaseModel):
     action: Literal["removed", "quoted"]
 
 
+class InputCheck(BaseModel):
+    """The input guard's verdict on the user's question for this turn."""
+
+    blocked: bool
+    score: float
+    rules: list[str]
+
+
 class TokenUsage(BaseModel):
     input_tokens: int = 0
     output_tokens: int = 0
@@ -167,6 +175,9 @@ class AgentState(BaseModel):
     sources: list[Source] = Field(default_factory=lambda: list(SOURCES))
     as_of: datetime = Field(default_factory=lambda: datetime.now(UTC))
     """"Now" for relative dates such as "last week"."""
+
+    input_check: InputCheck | None = None
+    """None when the input guard is disabled."""
 
     # planning and the hop loop
     plan: list[SubQuestion] = Field(default_factory=list)
