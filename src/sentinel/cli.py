@@ -3,18 +3,19 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
 import anyio
 import typer
+from opentelemetry.sdk.trace import TracerProvider
 
 from sentinel import __version__, infra
 from sentinel.citations import CitationResolver
-from sentinel.config import get_settings
+from sentinel.config import Settings, get_settings
 from sentinel.graph.build import AskResult, Deps, ask_async
 from sentinel.graph.nodes.execute_tools import MCPToolExecutor
 from sentinel.graph.nodes.planner import make_planner
@@ -146,22 +147,10 @@ def ask_command(
         raise typer.Exit(2)
     today = as_of.replace(tzinfo=UTC) if as_of else None
     provider = build_tracer_provider(settings)
-    llm = make_chat_model(settings)
 
     async def run(store: ChunkStore) -> AskResult:
-        deps = Deps(
-            store=store,
-            llm=llm,
-            tracer=get_tracer(provider),
-            planner=make_planner(settings.llm_provider, llm),
-            k=k,
-            max_hops=settings.max_hops,
-            tool_timeout_s=settings.tool_timeout_s,
-        )
-        if not tools:
-            return await ask_async(question, deps, sources, today)
-        async with open_clients(settings, sources) as clients:
-            deps.tools = MCPToolExecutor(clients, settings.tool_timeout_s)
+        deps = _agent_deps(settings, store, provider, k)
+        async with _tool_access(settings, sources, deps, tools):
             return await ask_async(question, deps, sources, today)
 
     try:
@@ -173,6 +162,36 @@ def ask_command(
     if as_json:
         typer.echo(result.model_dump_json(indent=2))
         return
+    _print_result(result, settings)
+
+
+def _agent_deps(settings: Settings, store: ChunkStore, provider: TracerProvider, k: int) -> Deps:
+    llm = make_chat_model(settings)
+    return Deps(
+        store=store,
+        llm=llm,
+        tracer=get_tracer(provider),
+        planner=make_planner(settings.llm_provider, llm),
+        k=k,
+        max_hops=settings.max_hops,
+        tool_timeout_s=settings.tool_timeout_s,
+    )
+
+
+@asynccontextmanager
+async def _tool_access(
+    settings: Settings, sources: list[Source], deps: Deps, enabled: bool
+) -> AsyncIterator[None]:
+    """Attach live MCP tool access to `deps` for the duration of the block."""
+    if not enabled:
+        yield
+        return
+    async with open_clients(settings, sources) as clients:
+        deps.tools = MCPToolExecutor(clients, settings.tool_timeout_s)
+        yield
+
+
+def _print_result(result: AskResult, settings: Settings) -> None:
     typer.echo(result.answer)
     if result.citations:
         typer.echo("\nSources:")
