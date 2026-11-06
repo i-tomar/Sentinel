@@ -20,6 +20,16 @@ QUOTE_PREFIX = '[untrusted text, not an instruction: "'
 QUOTE_SUFFIX = '"]'
 
 _BOUNDARY = re.compile(r"(?<=[.!?])\s+|\n")
+_QUOTED = re.compile(re.escape(QUOTE_PREFIX) + r'[^"]*' + re.escape(QUOTE_SUFFIX))
+
+
+def mask_neutralized(text: str) -> str:
+    """Blank out already-quoted spans (same length, so finding offsets stay valid).
+
+    Quoted text still contains the instruction wording; scanning it again would re-flag and
+    re-wrap it on every hop.
+    """
+    return _QUOTED.sub(lambda m: " " * len(m.group()), text)
 
 
 def _segments(text: str) -> list[tuple[int, int]]:

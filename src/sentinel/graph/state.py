@@ -97,6 +97,19 @@ class Evidence(BaseModel):
     score: float
     stale: bool = False
     """Superseded by a newer record on the same topic."""
+    untrusted_removed: int = 0
+    """Suspected injected instructions the retrieved-content guard neutralized in it."""
+
+
+class GuardNote(BaseModel):
+    """A retrieved record, chunk or memory note in which suspected instructions were
+    neutralized. Memory notes use the key "memory:<note key>"."""
+
+    key: str
+    score: float
+    rules: list[str]
+    spans: int
+    action: Literal["removed", "quoted"]
 
 
 class TokenUsage(BaseModel):
@@ -179,6 +192,9 @@ class AgentState(BaseModel):
     """Index chunks returned by search before the relevance gate."""
     index_chunks: list[Chunk] = Field(default_factory=list)
     stale_keys: list[str] = Field(default_factory=list)
+
+    # retrieved-content guard (per turn)
+    guard_notes: list[GuardNote] = Field(default_factory=list)
 
     # answer
     evidence: list[Evidence] = Field(default_factory=list)
