@@ -40,7 +40,7 @@ def test_seeded_records_are_clean_after_redaction() -> None:
         ("IBAN GB82 WEST 1234 5698 7654 32 for payment", "IBAN"),
         ("US office +1 212 555 0100 ext 4", "PHONE"),
         ("server 10.20.30.40 leaked", "IP_ADDRESS"),
-        ("SSN 078-05-1120 on the form", "US_SSN"),
+        ("SSN 536-90-4421 on the form", "US_SSN"),  # presidio rejects known sample SSNs
     ],
 )
 def test_detects_each_kind(text: str, kind: str) -> None:
@@ -59,6 +59,7 @@ def test_detects_each_kind(text: str, kind: str) -> None:
         "Notion page 0b8c7e9a-1d2f-4a3b-9c8d-7e6f5a4b3c2d and thread 18c2f0a9b7d3e4f1.",
         "Qdrant v1.20.0, Langfuse 4.76.0, port 6333, 120 seats, renewal 2027-01-31.",
         "Card ending 4111 1111 1111 1112 is invalid (fails the Luhn check).",
+        "Order 1234 5678 9012 3456 7890 is a long reference number.",
         "See https://jira.fixture.acme.test/browse/PROJ-142 for details.",
     ],
 )
