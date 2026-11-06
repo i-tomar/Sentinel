@@ -38,6 +38,8 @@ def test_env_example_loads_and_covers_every_setting(isolated_env: Path) -> None:
 
 def test_env_vars_override_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("LLM_MODEL", "some-model")
+    monkeypatch.setenv("LLM_API_KEY", "sk-test")
     monkeypatch.setenv("MAX_HOPS", "6")
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", " Acme.test, @partner.test ,")
     s = Settings()
@@ -74,6 +76,23 @@ def test_invalid_values_are_rejected(monkeypatch: pytest.MonkeyPatch, key: str, 
 def test_unknown_dotenv_key_is_rejected(isolated_env: Path) -> None:
     (isolated_env / ".env").write_text("LLM_PROVDER=openai\n", encoding="utf-8")
     with pytest.raises(ValidationError):
+        Settings()
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"LLM_PROVIDER": "openai"},
+        {"LLM_PROVIDER": "anthropic", "LLM_API_KEY": "k"},
+        {"LLM_PROVIDER": "google", "LLM_MODEL": "m"},
+    ],
+)
+def test_real_llm_provider_requires_model_and_key(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, str]
+) -> None:
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    with pytest.raises(ValidationError, match="LLM_MODEL and LLM_API_KEY"):
         Settings()
 
 
