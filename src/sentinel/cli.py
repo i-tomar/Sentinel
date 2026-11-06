@@ -294,6 +294,7 @@ def _agent_deps(
         memory_auto_approve=auto_approve,
         injection_detector=InjectionDetector(threshold=settings.injection_threshold),
         guard_mode=settings.retrieved_guard_mode,
+        input_detector=InjectionDetector(threshold=settings.injection_threshold),
     )
 
 
@@ -322,6 +323,9 @@ def _print_result(result: AskResult, settings: Settings) -> None:
         typer.echo(f"  {sq.id} [{sq.relation} -> {','.join(sq.target_sources)}] {sq.text}{mark}")
     for failure in result.failures:
         typer.echo(f"  tool failure: {failure.source}.{failure.tool}: {failure.error}")
+    check = result.input_check
+    if check is not None and check.blocked:
+        typer.echo(f"  input guard: blocked (score {check.score}; {', '.join(check.rules)})")
     for guard in result.guard_notes:
         typer.echo(
             f"  guard: {guard.action} {guard.spans} suspected instruction(s) from {guard.key} "

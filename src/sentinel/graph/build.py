@@ -1,6 +1,8 @@
 """Graph wiring.
 
-START -> load_memory -> plan -> route -> execute_tools -> retrieve -> retrieved_guard -> verify
+START -> input_guard -+-> END (question flagged: refusal, nothing else runs)
+                      +-> load_memory -> plan -> route -> execute_tools -> retrieve
+                          -> retrieved_guard -> verify
     verify -+-> route (next hop)
             +-> answer -> citation_check -> save_memory -> record_turn -> END
 
@@ -33,6 +35,7 @@ from sentinel.graph.conversation import context_from, prune_memory
 from sentinel.graph.nodes.answerer import build_messages, insufficient_answer, is_insufficient
 from sentinel.graph.nodes.citation_check import check_answer
 from sentinel.graph.nodes.execute_tools import ToolExecutor, execute_calls
+from sentinel.graph.nodes.input_guard import blocked_answer, check_question
 from sentinel.graph.nodes.planner import Planner, RulePlanner
 from sentinel.graph.nodes.retrieve import assemble_evidence, relevant_chunks
 from sentinel.graph.nodes.retrieved_guard import (
@@ -59,6 +62,7 @@ from sentinel.graph.state import (
     AgentState,
     CitationReport,
     GuardNote,
+    InputCheck,
     SubQuestion,
     TokenUsage,
     ToolCall,
@@ -108,6 +112,8 @@ class Deps:
     injection_detector: InjectionDetector | None = field(default_factory=InjectionDetector)
     """Retrieved-content guard. None disables it (only for experiments and eval baselines)."""
     guard_mode: GuardMode = "remove"
+    input_detector: InjectionDetector | None = field(default_factory=InjectionDetector)
+    """Input guard for the user's question. None disables it (experiments only)."""
 
 
 def _model_name(llm: BaseChatModel) -> str:
@@ -142,6 +148,19 @@ def build_graph(deps: Deps) -> Any:
                 return await fn(state)
 
         return run
+
+    async def input_guard(state: AgentState) -> dict[str, Any]:
+        if deps.input_detector is None:
+            return {"input_check": None}
+        check = check_question(state.question, deps.input_detector)
+        with deps.tracer.start_as_current_span("guard.input") as span:
+            span.set_attribute("sentinel.input.blocked", check.blocked)
+            span.set_attribute("sentinel.input.score", check.score)
+            span.set_attribute("sentinel.input.rules", check.rules)
+        if not check.blocked:
+            return {"input_check": check}
+        answer = blocked_answer(check)
+        return {"input_check": check, "draft": answer, "answer": answer}
 
     async def load_memory(state: AgentState) -> dict[str, Any]:
         if deps.memory is None:
@@ -399,6 +418,7 @@ def build_graph(deps: Deps) -> Any:
 
     graph = StateGraph(AgentState)
     for name, fn in (
+        ("input_guard", input_guard),
         ("load_memory", load_memory),
         ("plan", plan),
         ("route", route_node),
@@ -412,7 +432,12 @@ def build_graph(deps: Deps) -> Any:
         ("record_turn", record_turn),
     ):
         graph.add_node(name, traced(name, fn))
-    graph.add_edge(START, "load_memory")
+    graph.add_edge(START, "input_guard")
+    graph.add_conditional_edges(
+        "input_guard",
+        lambda s: "blocked" if s.input_check is not None and s.input_check.blocked else "ok",
+        {"blocked": END, "ok": "load_memory"},
+    )
     graph.add_edge("load_memory", "plan")
     graph.add_edge("plan", "route")
     graph.add_edge("route", "execute_tools")
@@ -446,10 +471,13 @@ class AskResult(BaseModel):
     errors: list[str]
     guard_notes: list[GuardNote]
     """Retrieved records in which suspected injected instructions were neutralized."""
+    input_check: InputCheck | None
+    """The input guard's verdict; `blocked` means nothing past the guard ran this turn."""
     thread_id: str | None
     """Set when a checkpointer is configured; pass it back to continue the conversation."""
     turn: int
-    """1 for a new thread (or no checkpointer), n for the n-th question of a thread."""
+    """1 for a new thread (or no checkpointer), n for the n-th question of a thread. Blocked
+    questions are not added to the thread, so they do not advance it."""
     memory_notes: list[MemoryItem]
     """Long-term memory consulted this turn (with this turn's conflicts flagged stale)."""
     memory_writes: list[MemoryWrite]
@@ -488,6 +516,9 @@ async def ask_async(
         state = AgentState.model_validate(out)
         latency_ms = int((time.perf_counter() - started) * 1000)
         set_text(root, "langfuse.trace.output", state.answer)
+        root.set_attribute(
+            "sentinel.input_blocked", state.input_check is not None and state.input_check.blocked
+        )
         root.set_attribute("sentinel.hops", state.hops)
         root.set_attribute("sentinel.tool_calls", len(state.tool_calls))
         root.set_attribute("sentinel.tool_failures", len(state.failures))
@@ -510,6 +541,7 @@ async def ask_async(
         stale_keys=state.stale_keys,
         errors=state.errors,
         guard_notes=state.guard_notes,
+        input_check=state.input_check,
         thread_id=thread_id,
         turn=len(state.turns),
         memory_notes=state.memory_notes,
