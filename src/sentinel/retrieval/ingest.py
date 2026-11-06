@@ -6,50 +6,18 @@ Only records returned by the source MCP tools are indexed. Fixture ground truth
 
 from __future__ import annotations
 
-import json
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
-from typing import Any
 
 from mcp import Client
-from mcp.types import TextContent
 from pydantic import BaseModel
 
+from sentinel.mcp_clients.tools import NORMALIZERS, SOURCE_TOOLS, ToolCallError, call_json
 from sentinel.retrieval.chunking import DEFAULT_MAX_CHARS, DEFAULT_OVERLAP_CHARS, chunk_document
 from sentinel.retrieval.models import Document, Source
-from sentinel.retrieval.normalize import gmail_document, jira_document, notion_document
 from sentinel.retrieval.store import ChunkStore
 
 PAGE_SIZE = 50
-
-
-class IngestError(RuntimeError):
-    pass
-
-
-class _SourceSpec(BaseModel):
-    search_tool: str
-    id_field: str
-    get_tool: str
-    get_arg: str
-
-
-SPECS: dict[Source, _SourceSpec] = {
-    "notion": _SourceSpec(
-        search_tool="search_pages", id_field="id", get_tool="get_page", get_arg="page_id"
-    ),
-    "jira": _SourceSpec(
-        search_tool="search_issues", id_field="key", get_tool="get_issue", get_arg="key"
-    ),
-    "gmail": _SourceSpec(
-        search_tool="search_threads", id_field="id", get_tool="get_thread", get_arg="thread_id"
-    ),
-}
-NORMALIZERS: dict[Source, Callable[[Any, datetime], Document]] = {
-    "notion": notion_document,
-    "jira": jira_document,
-    "gmail": gmail_document,
-}
 
 
 class SourceReport(BaseModel):
@@ -63,19 +31,8 @@ class SourceReport(BaseModel):
     error: str | None = None
 
 
-async def call_json(client: Client, tool: str, args: dict[str, Any]) -> Any:
-    result = await client.call_tool(tool, args)
-    text = "".join(b.text for b in result.content if isinstance(b, TextContent))
-    if result.is_error:
-        raise IngestError(f"{tool} failed: {text}")
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise IngestError(f"{tool} returned malformed JSON") from exc
-
-
 async def fetch_documents(source: Source, client: Client, fetched_at: datetime) -> list[Document]:
-    spec = SPECS[source]
+    spec = SOURCE_TOOLS[source]
     ids: list[str] = []
     while True:
         page = await call_json(
@@ -138,7 +95,7 @@ async def ingest(
     for source, client in clients.items():
         try:
             docs = await fetch_documents(source, client, now)
-        except (IngestError, KeyError, TypeError, ValueError) as exc:
+        except (ToolCallError, KeyError, TypeError, ValueError) as exc:
             reports.append(SourceReport(source=source, error=f"{type(exc).__name__}: {exc}"))
             continue
         reports.append(sync_documents(store, source, docs))
