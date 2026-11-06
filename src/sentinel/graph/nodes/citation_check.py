@@ -14,6 +14,7 @@ from collections.abc import Sequence
 from sentinel.citations import Citation, cited_numbers
 from sentinel.graph.nodes.answerer import is_insufficient
 from sentinel.graph.state import CitationReport, Evidence, UnsupportedClaim
+from sentinel.llm import INSUFFICIENT_PREFIX, PARTIAL_PREFIX
 from sentinel.text import content_tokens, split_sentences
 
 SUPPORT_THRESHOLD = 0.5
@@ -48,7 +49,7 @@ def check_answer(
         for sentence in _sentences_with_markers(answer):
             cited = [n for n in cited_numbers(sentence) if n in by_n]
             words = content_tokens(_MARKER.sub("", sentence))
-            if not words:
+            if not words or sentence.startswith((PARTIAL_PREFIX, INSUFFICIENT_PREFIX)):
                 continue
             if not cited:
                 report.uncited_sentences.append(sentence)
