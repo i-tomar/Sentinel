@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import time
+import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -20,11 +21,13 @@ from typing import Any, Protocol
 import anyio
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from opentelemetry.trace import Tracer
 from pydantic import BaseModel
 
 from sentinel.citations import Citation
+from sentinel.graph.conversation import context_from, prune_memory
 from sentinel.graph.nodes.answerer import build_messages, insufficient_answer, is_insufficient
 from sentinel.graph.nodes.citation_check import check_answer
 from sentinel.graph.nodes.execute_tools import ToolExecutor, execute_calls
@@ -39,6 +42,8 @@ from sentinel.graph.state import (
     TokenUsage,
     ToolCall,
     ToolFailure,
+    TurnRecord,
+    new_turn_input,
 )
 from sentinel.retrieval.models import SOURCES, Source
 from sentinel.retrieval.store import ChunkStore
@@ -65,6 +70,8 @@ class Deps:
     tool_retries: int = 2
     backoff_s: float = 0.5
     sleep: Callable[[float], Awaitable[None]] = anyio.sleep
+    checkpointer: BaseCheckpointSaver[Any] | None = None
+    """Short-term memory per thread_id. None = every question starts from scratch."""
 
 
 def _model_name(llm: BaseChatModel) -> str:
@@ -93,9 +100,13 @@ def build_graph(deps: Deps) -> Any:
         return run
 
     async def plan(state: AgentState) -> dict[str, Any]:
-        result, notes, tokens = deps.planner.plan(state.question, state.sources)
+        context = context_from(state.turns, state.documents)
+        result, notes, tokens = deps.planner.plan(state.question, state.sources, context)
         with deps.tracer.start_as_current_span("planner.plan") as span:
             set_text(span, "sentinel.plan", result.model_dump_json())
+            span.set_attribute(
+                "sentinel.follow_up", any(sq.prior_keys for sq in result.sub_questions)
+            )
         return {
             "plan": result.sub_questions,
             "errors": [*state.errors, *notes],
@@ -117,7 +128,16 @@ def build_graph(deps: Deps) -> Any:
                 allowed_sources=state.sources,
                 widened=state.widened,
             )
-        return {"hops": hop, "current": [sq.id for sq in batch], "pending_calls": calls}
+        sq_docs = dict(state.sq_docs)
+        for sq in batch:
+            if sq.relation == "recall":  # evidence straight from this thread's memory
+                sq_docs[sq.id] = [k for k in sq.prior_keys if k in state.documents]
+        return {
+            "hops": hop,
+            "current": [sq.id for sq in batch],
+            "pending_calls": calls,
+            "sq_docs": sq_docs,
+        }
 
     async def execute(state: AgentState) -> dict[str, Any]:
         if deps.tools is None or not state.pending_calls:
@@ -214,7 +234,12 @@ def build_graph(deps: Deps) -> Any:
             )
             return {"draft": draft, "evidence": []}
         messages = build_messages(
-            state.question, evidence, state.plan, state.failures, state.unanswered
+            state.question,
+            evidence,
+            state.plan,
+            state.failures,
+            state.unanswered,
+            history=[t.question for t in state.turns][-3:],
         )
         with deps.tracer.start_as_current_span("llm.generate") as span:
             set_text(span, "langfuse.observation.input", str(messages[-1].content))
@@ -238,6 +263,21 @@ def build_graph(deps: Deps) -> Any:
             "insufficient_evidence": is_insufficient(final),
         }
 
+    async def record_turn(state: AgentState) -> dict[str, Any]:
+        turn = TurnRecord(
+            question=state.question,
+            answer=state.answer,
+            as_of=state.as_of,
+            plan=state.plan,
+            unanswered=state.unanswered,
+            sq_docs=state.sq_docs,
+            evidence_keys=[ev.citation.key for ev in state.evidence],
+            cited_keys=[c.key for c in state.citations],
+            failed_sources=sorted({f.source for f in state.failures}),
+        )
+        turns, documents = prune_memory([*state.turns, turn], state.documents)
+        return {"turns": turns, "documents": documents}
+
     graph = StateGraph(AgentState)
     for name, fn in (
         ("plan", plan),
@@ -247,6 +287,7 @@ def build_graph(deps: Deps) -> Any:
         ("verify", verify),
         ("answer", answer),
         ("citation_check", citation_check),
+        ("record_turn", record_turn),
     ):
         graph.add_node(name, traced(name, fn))
     graph.add_edge(START, "plan")
@@ -258,8 +299,9 @@ def build_graph(deps: Deps) -> Any:
         "verify", lambda s: s.next_step, {"route": "route", "answer": "answer"}
     )
     graph.add_edge("answer", "citation_check")
-    graph.add_edge("citation_check", END)
-    return graph.compile()
+    graph.add_edge("citation_check", "record_turn")
+    graph.add_edge("record_turn", END)
+    return graph.compile(checkpointer=deps.checkpointer)
 
 
 class AskResult(BaseModel):
@@ -277,6 +319,10 @@ class AskResult(BaseModel):
     failures: list[ToolFailure]
     stale_keys: list[str]
     errors: list[str]
+    thread_id: str | None
+    """Set when a checkpointer is configured; pass it back to continue the conversation."""
+    turn: int
+    """1 for a new thread (or no checkpointer), n for the n-th question of a thread."""
     trace_id: str
     latency_ms: int
     token_usage: TokenUsage
@@ -287,16 +333,28 @@ async def ask_async(
     deps: Deps,
     sources: Sequence[Source] | None = None,
     as_of: datetime | None = None,
+    thread_id: str | None = None,
 ) -> AskResult:
+    """Answer one question. With `deps.checkpointer`, the turn joins `thread_id`'s short-term
+    memory (a new id is generated when None); without one, nothing is remembered."""
     graph = build_graph(deps)
     chosen = list(sources or SOURCES)
-    initial = AgentState(question=question, sources=chosen, as_of=as_of or datetime.now(UTC))
+    if deps.checkpointer is not None and thread_id is None:
+        thread_id = uuid.uuid4().hex
+    if deps.checkpointer is None:
+        thread_id = None
+    config: dict[str, Any] = {"recursion_limit": 10 + 6 * deps.max_hops}
+    if thread_id is not None:
+        config["configurable"] = {"thread_id": thread_id}
+    turn_input = new_turn_input(question, chosen, as_of or datetime.now(UTC))
     with deps.tracer.start_as_current_span("sentinel.ask") as root:
         trace_id = trace_id_hex(root)
         root.set_attribute("langfuse.trace.name", "sentinel.ask")
+        if thread_id is not None:
+            root.set_attribute("langfuse.session.id", thread_id)  # groups a thread's traces
         set_text(root, "langfuse.trace.input", question)
         started = time.perf_counter()
-        out = await graph.ainvoke(initial, config={"recursion_limit": 10 + 6 * deps.max_hops})
+        out = await graph.ainvoke(turn_input, config=config)
         state = AgentState.model_validate(out)
         latency_ms = int((time.perf_counter() - started) * 1000)
         set_text(root, "langfuse.trace.output", state.answer)
@@ -321,6 +379,8 @@ async def ask_async(
         failures=state.failures,
         stale_keys=state.stale_keys,
         errors=state.errors,
+        thread_id=thread_id,
+        turn=len(state.turns),
         trace_id=trace_id,
         latency_ms=latency_ms,
         token_usage=state.token_usage,
@@ -339,3 +399,12 @@ def ask(
         return await ask_async(question, deps, sources, as_of)
 
     return anyio.run(run)
+
+
+async def thread_turns(deps: Deps, thread_id: str) -> list[TurnRecord]:
+    """The remembered turns of a thread (empty for unknown ids or without a checkpointer)."""
+    if deps.checkpointer is None:
+        return []
+    snapshot = await build_graph(deps).aget_state({"configurable": {"thread_id": thread_id}})
+    values = snapshot.values or {}
+    return [TurnRecord.model_validate(t) for t in values.get("turns", [])]

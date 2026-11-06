@@ -53,8 +53,14 @@ def build_messages(
     plan: Sequence[SubQuestion] = (),
     failures: Sequence[ToolFailure] = (),
     unanswered: Sequence[str] = (),
+    history: Sequence[str] = (),
 ) -> list[BaseMessage]:
     parts = [f"Question: {question}"]
+    if history:
+        parts.append(
+            "Earlier questions in this conversation (for resolving references like "
+            '"them"):\n' + "\n".join(f"- {_attr(q)}" for q in history)
+        )
     if plan:
         parts.append(
             "Sub-questions:\n"

@@ -84,6 +84,47 @@ def test_ask_three_hop_with_live_fixture_tools() -> None:
     assert re.search(r"trace_id=[0-9a-f]{32} ", out)
 
 
+CHAT_FIRST = "Which tickets are blocked by the auth migration?"
+
+
+def test_chat_resumes_a_thread_across_invocations() -> None:
+    first = runner.invoke(app, ["chat", CHAT_FIRST, "--thread", "demo", "--as-of", "2026-11-02"])
+    assert first.exit_code == 0, first.output
+    assert "thread_id=demo turn=1" in first.stdout
+
+    # a separate invocation (fresh process state) continues the same thread from the checkpoint
+    second = runner.invoke(app, ["chat", "Who emailed about them?", "-t", "demo"])
+    assert second.exit_code == 0, second.output
+    assert "thread_id=demo turn=2" in second.stdout
+    assert "sq1 [mentions -> gmail] Which emails mention PROJ-142, PROJ-147, PROJ-151?" in (
+        second.stdout
+    )
+
+    history = runner.invoke(app, ["chat", "--history", "-t", "demo"])
+    assert history.exit_code == 0, history.output
+    assert f"[1] Q: {CHAT_FIRST}" in history.stdout
+    assert "[2] Q: Who emailed about them?" in history.stdout
+
+
+def test_chat_interactive_session_keeps_one_thread() -> None:
+    session = runner.invoke(
+        app,
+        ["chat", "--as-of", "2026-11-02"],
+        input=f"{CHAT_FIRST}\n\nWho is assigned the second ticket?\nexit\n",
+    )
+    assert session.exit_code == 0, session.output
+    thread_ids = set(re.findall(r"thread_id=([0-9a-f]{32})", session.stdout))
+    assert len(thread_ids) == 1
+    assert "turn=1" in session.stdout
+    assert "turn=2" in session.stdout
+    assert "[recall -> jira]" in session.stdout
+
+
+def test_chat_validates_arguments() -> None:
+    assert runner.invoke(app, ["chat", "q", "--thread", "bad id!"]).exit_code == 2
+    assert runner.invoke(app, ["chat", "--history"]).exit_code == 2
+
+
 def test_ask_without_evidence_says_so() -> None:
     assert runner.invoke(app, ["ingest", "-s", "notion"]).exit_code == 0
     result = runner.invoke(app, ["ask", "What is the capital of France?"])

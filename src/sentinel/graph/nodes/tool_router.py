@@ -1,8 +1,9 @@
 """Turn ready sub-questions into read-only tool calls.
 
 Only (source, tool) pairs in `READ_TOOLS` can be produced. Dependent sub-questions take
-arguments from earlier results only as ticket keys matching a strict pattern, capped at
-MAX_ENTITIES, so text inside records cannot inject instructions or pick tools.
+arguments from earlier results (this turn's dependencies or records remembered from earlier
+turns) only as ticket keys matching a strict pattern, capped at MAX_ENTITIES, so text inside
+records cannot inject instructions or pick tools. `recall` sub-questions make no calls.
 """
 
 from __future__ import annotations
@@ -88,12 +89,12 @@ def route(
         )
 
     for sq in sub_questions:
+        dep_keys = [k for d in sq.depends_on for k in sq_docs.get(d, [])] + sq.prior_keys
         dep_docs = [
-            documents[k]
-            for d in sq.depends_on
-            for k in sq_docs.get(d, [])
-            if k in documents and k not in stale
+            documents[k] for k in dict.fromkeys(dep_keys) if k in documents and k not in stale
         ]
+        if sq.relation == "recall":
+            continue  # answered from records already in this thread's memory
         if sq.relation == "search":
             sources = (
                 [s for s in allowed_sources if s not in sq.target_sources]
@@ -108,9 +109,9 @@ def route(
         elif sq.relation == "blocked_by":
             for key in ticket_keys(dep_docs)[:MAX_ENTITIES]:
                 add(sq, "jira", "search_issues", {"blocked_by": key, "limit": LINKED_LIMIT}, 10)
-        else:  # mentions
-            jira_docs = [d for d in dep_docs if d.source == "jira"]
-            for key in ticket_keys(jira_docs)[:MAX_ENTITIES]:
+        else:  # mentions: emails about the dependency's own tickets
+            jira_ids = [d.id for d in dep_docs if d.source == "jira"]
+            for key in list(dict.fromkeys(jira_ids))[:MAX_ENTITIES]:
                 args = {"query": key, "limit": SEARCH_LIMIT, **_gmail_filters(sq, as_of)}
                 add(sq, "gmail", "search_threads", args, SEARCH_EXPAND)
     return calls

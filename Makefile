@@ -73,8 +73,8 @@ search: ## Debug retrieval: make search Q="auth migration owner"
 ask: ## Ask one question with citations: make ask Q="..."
 	$(UV) run sentinel ask "$(Q)"
 
-chat: ## Multi-turn chat with a thread id               [step g]
-	@echo "not implemented yet: lands in Phase 2 step g" && exit 1
+chat: ## Multi-turn chat; continue a thread with T=<thread id>
+	$(UV) run sentinel chat $(if $(T),--thread $(T),)
 
 serve: ## FastAPI on :8000                               [step l]
 	@echo "not implemented yet: lands in Phase 3 step l" && exit 1
