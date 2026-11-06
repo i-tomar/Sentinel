@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
@@ -13,6 +14,7 @@ LLMProvider = Literal["openai", "google", "anthropic", "mock"]
 EmbeddingProvider = Literal["local", "hash", "openai", "google"]
 DataMode = Literal["fixture", "live"]
 MemoryBackendName = Literal["sqlite", "okf"]
+LiveSource = Literal["notion", "jira", "gmail"]
 TracingBackend = Literal["langfuse", "langsmith", "none"]
 
 
@@ -59,12 +61,22 @@ class Settings(BaseSettings):
     langsmith_api_key: SecretStr | None = None
     langsmith_project: str = "sentinel"
 
-    # Live connectors
+    # Live connectors (DATA_MODE=live; read-only)
+    live_sources: Annotated[tuple[LiveSource, ...], NoDecode] = ("notion",)
+    """Sources that go live; enable them one at a time (notion, then jira, then gmail)."""
+    live_max_records: int = Field(default=200, ge=1, le=5000)
+    """Per-source cap on records pulled by one live ingest."""
     notion_token: SecretStr | None = None
     jira_base_url: str | None = None
     jira_email: str | None = None
     jira_api_token: SecretStr | None = None
+    jira_project_keys: Annotated[tuple[str, ...], NoDecode] = ()
+    gmail_client_id: str | None = None
+    gmail_client_secret: SecretStr | None = None
+    gmail_refresh_token: SecretStr | None = None
     gmail_mcp_command: str | None = None
+    """Optional: launch this command instead of the built-in read-only Gmail server. It must
+    expose the same search_threads / get_thread tools."""
 
     # Guardrails & permissions
     allowed_email_domains: Annotated[tuple[str, ...], NoDecode] = ("acme.test",)
@@ -91,6 +103,57 @@ class Settings(BaseSettings):
                 "(or use LLM_PROVIDER=mock)"
             )
         return self
+
+    @field_validator("live_sources", mode="before")
+    @classmethod
+    def _split_sources(cls, value: object) -> object:
+        if isinstance(value, str):
+            return tuple(s.strip().lower() for s in value.split(",") if s.strip())
+        return value
+
+    @field_validator("jira_project_keys", mode="before")
+    @classmethod
+    def _split_project_keys(cls, value: object) -> object:
+        if isinstance(value, str):
+            value = tuple(k.strip().upper() for k in value.split(",") if k.strip())
+        if isinstance(value, tuple | list):
+            bad = [k for k in value if not re.fullmatch(r"[A-Z][A-Z0-9_]{0,9}", str(k))]
+            if bad:
+                raise ValueError(f"invalid JIRA_PROJECT_KEYS entries: {bad}")
+        return value
+
+    def live_missing(self) -> dict[str, list[str]]:
+        """Enabled live source -> env vars that are missing or invalid (empty = ready)."""
+        need: dict[str, list[str]] = {}
+        for source in self.live_sources:
+            if source == "notion":
+                need[source] = [] if self.notion_token else ["NOTION_TOKEN"]
+            elif source == "jira":
+                missing = [
+                    name
+                    for name, value in (
+                        ("JIRA_BASE_URL", self.jira_base_url),
+                        ("JIRA_EMAIL", self.jira_email),
+                        ("JIRA_API_TOKEN", self.jira_api_token),
+                    )
+                    if not value
+                ]
+                if self.jira_base_url and not self.jira_base_url.startswith("https://"):
+                    missing.append("JIRA_BASE_URL (must start with https://)")
+                need[source] = missing
+            elif self.gmail_mcp_command:
+                need[source] = []
+            else:
+                need[source] = [
+                    name
+                    for name, value in (
+                        ("GMAIL_CLIENT_ID", self.gmail_client_id),
+                        ("GMAIL_CLIENT_SECRET", self.gmail_client_secret),
+                        ("GMAIL_REFRESH_TOKEN", self.gmail_refresh_token),
+                    )
+                    if not value
+                ]
+        return need
 
     @model_validator(mode="after")
     def _no_memory_auto_approve_on_live_data(self) -> Settings:

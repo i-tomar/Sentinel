@@ -6,6 +6,7 @@ import json
 import re
 import sys
 import uuid
+import webbrowser
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from datetime import UTC, datetime
@@ -23,8 +24,15 @@ from sentinel.graph.build import AskResult, Deps, ask_async, thread_turns
 from sentinel.graph.checkpoint import open_checkpointer
 from sentinel.graph.nodes.execute_tools import MCPToolExecutor
 from sentinel.graph.nodes.planner import make_planner
+from sentinel.live.gmail import API as GMAIL_API
+from sentinel.live.gmail import READONLY_SCOPE
+from sentinel.live.gmail import TOKEN_URL as GMAIL_TOKEN_URL
+from sentinel.live.gmail_consent import obtain_refresh_token
+from sentinel.live.notion import API as NOTION_API
+from sentinel.live.notion import NOTION_VERSION
+from sentinel.live.smoke import SmokeReport, describe, smoke
 from sentinel.llm import make_chat_model
-from sentinel.mcp_clients.pool import open_clients
+from sentinel.mcp_clients.pool import active_sources, open_clients
 from sentinel.memory.backend import MemoryBackend
 from sentinel.memory.models import MemoryItem
 from sentinel.memory.policy import make_memory_backend
@@ -82,16 +90,14 @@ def _open_store() -> Iterator[ChunkStore]:
 def ingest(source: SourceOption = None) -> None:
     """Fetch records over MCP (fixture servers by default) and sync them into Qdrant."""
     settings = get_settings()
-    sources = _sources(source)
-    if settings.data_mode == "live":
-        typer.echo("DATA_MODE=live connectors arrive in step (i); use fixture.", err=True)
-        raise typer.Exit(2)
+    sources = _require_live_ready(settings, _sources(source))
+    cap = settings.live_max_records if settings.data_mode == "live" else None
 
     with _open_store() as store:
 
         async def run() -> list[SourceReport]:
             async with open_clients(settings, sources) as clients:
-                return await ingest_sources(clients, store)
+                return await ingest_sources(clients, store, max_records=cap)
 
         reports = anyio.run(run)
         for r in reports:
@@ -102,6 +108,7 @@ def ingest(source: SourceOption = None) -> None:
                     f"ok   {r.source:<7} docs={r.documents} added={r.added} updated={r.updated} "
                     f"unchanged={r.unchanged} deleted={r.deleted} "
                     f"chunks_written={r.chunks_written}"
+                    + (" (capped at LIVE_MAX_RECORDS; nothing deleted)" if r.truncated else "")
                 )
         typer.echo(f"collection {store.collection}: {store.count()} chunks")
     if any(r.error for r in reports):
@@ -150,9 +157,8 @@ def ask_command(
     """Plan, call tools over several hops, and answer with citations and a trace id."""
     settings = get_settings()
     sources = _sources(source)
-    if tools and settings.data_mode == "live":
-        typer.echo("DATA_MODE=live connectors arrive in step (i); use --no-tools.", err=True)
-        raise typer.Exit(2)
+    if tools:
+        sources = _require_live_ready(settings, sources)
     auto_approve = _memory_auto_approve(settings, auto_approve_memory)
     today = as_of.replace(tzinfo=UTC) if as_of else None
     provider = build_tracer_provider(settings)
@@ -208,9 +214,8 @@ def chat(
         )
     if history and thread is None:
         raise typer.BadParameter("--history needs --thread", param_hint="--history")
-    if tools and settings.data_mode == "live":
-        typer.echo("DATA_MODE=live connectors arrive in step (i); use --no-tools.", err=True)
-        raise typer.Exit(2)
+    if tools:
+        sources = _require_live_ready(settings, sources)
     auto_approve = _memory_auto_approve(settings, auto_approve_memory)
     today = as_of.replace(tzinfo=UTC) if as_of else None
     thread_id = thread or uuid.uuid4().hex
@@ -328,6 +333,116 @@ def _print_result(result: AskResult, settings: Settings) -> None:
         f"tokens_out={usage.output_tokens} tracing={settings.tracing_backend} "
         f"llm={settings.llm_provider}"
     )
+
+
+def _require_live_ready(settings: Settings, sources: list[Source]) -> list[Source]:
+    """Fixture mode: unchanged. Live mode: only LIVE_SOURCES, and every one configured."""
+    chosen = active_sources(settings, sources)
+    if settings.data_mode != "live":
+        return chosen
+    if not chosen:
+        typer.echo("none of the requested sources is in LIVE_SOURCES", err=True)
+        raise typer.Exit(2)
+    missing = {s: m for s, m in settings.live_missing().items() if m and s in chosen}
+    if missing:
+        for s, names in missing.items():
+            typer.echo(f"{s}: missing {', '.join(names)}", err=True)
+        typer.echo("run `sentinel live check` for details", err=True)
+        raise typer.Exit(2)
+    return chosen
+
+
+live_app = typer.Typer(
+    no_args_is_help=True, help="Live (read-only) connectors: readiness, smoke test, Gmail consent."
+)
+app.add_typer(live_app, name="live")
+
+_LIVE_ENDPOINTS: dict[str, list[str]] = {
+    "notion": [
+        f"POST {NOTION_API}/search  (search only)",
+        f"GET  {NOTION_API}/pages/<id>, {NOTION_API}/blocks/<id>/children",
+        f"Notion-Version: {NOTION_VERSION}",
+    ],
+    "jira": [
+        "GET  <JIRA_BASE_URL>/rest/api/3/search/jql",
+        "GET  <JIRA_BASE_URL>/rest/api/3/issue/<KEY>",
+    ],
+    "gmail": [
+        f"POST {GMAIL_TOKEN_URL}  (refresh token -> access token)",
+        f"GET  {GMAIL_API}/threads, {GMAIL_API}/threads/<id>",
+        f"scope: {READONLY_SCOPE} (any broader grant is refused)",
+    ],
+}
+
+
+@live_app.command("check")
+def live_check() -> None:
+    """Show live configuration and what is missing. Makes no network calls."""
+    settings = get_settings()
+    typer.echo(
+        f"DATA_MODE={settings.data_mode} LIVE_SOURCES={','.join(settings.live_sources) or '-'}"
+    )
+    missing = settings.live_missing()
+    for source in SOURCES:
+        if source not in settings.live_sources:
+            typer.echo(f"{source:<7} not enabled")
+            continue
+        state = "ready" if not missing[source] else f"missing {', '.join(missing[source])}"
+        typer.echo(f"{source:<7} {state}")
+        for line in _LIVE_ENDPOINTS[source]:
+            typer.echo(f"         {line}")
+    if any(missing.values()):
+        raise typer.Exit(1)
+
+
+@live_app.command("smoke")
+def live_smoke(
+    source: Annotated[str, typer.Option("--source", "-s", help="notion, jira or gmail")],
+    yes: Annotated[
+        bool, typer.Option("--yes", help="Confirm: this calls the real API (read-only).")
+    ] = False,
+) -> None:
+    """One read-only search (limit 1) and one fetch against a real account. Prints counts
+    and ids only. Requires DATA_MODE=live and --yes."""
+    settings = get_settings()
+    [chosen] = _sources([source])
+    if settings.data_mode != "live":
+        typer.echo("smoke needs DATA_MODE=live", err=True)
+        raise typer.Exit(2)
+    _require_live_ready(settings, [chosen])
+    if not yes:
+        typer.echo(f"would call on {chosen}: {'; '.join(describe()[chosen])}")
+        typer.echo("re-run with --yes to make these read-only calls")
+        raise typer.Exit(1)
+
+    async def run() -> SmokeReport:
+        async with open_clients(settings, [chosen]) as clients:
+            return await smoke(chosen, clients[chosen])
+
+    report = anyio.run(run)
+    typer.echo(report.model_dump_json(indent=2))
+    if not report.ok:
+        raise typer.Exit(1)
+
+
+@live_app.command("gmail-auth")
+def live_gmail_auth(
+    timeout_s: Annotated[float, typer.Option(help="Seconds to wait for consent.")] = 300.0,
+) -> None:
+    """Run Google's consent flow (gmail.readonly only) and print GMAIL_REFRESH_TOKEN."""
+    settings = get_settings()
+    if not (settings.gmail_client_id and settings.gmail_client_secret):
+        typer.echo("set GMAIL_CLIENT_ID and GMAIL_CLIENT_SECRET first", err=True)
+        raise typer.Exit(2)
+    client_id = settings.gmail_client_id
+    secret = settings.gmail_client_secret.get_secret_value()
+
+    async def run() -> str:
+        return await obtain_refresh_token(client_id, secret, webbrowser.open, timeout_s)
+
+    token = anyio.run(run)
+    typer.echo("Consent granted for gmail.readonly only. Add this line to .env (keep it secret):")
+    typer.echo(f"GMAIL_REFRESH_TOKEN={token}")
 
 
 memory_app = typer.Typer(
