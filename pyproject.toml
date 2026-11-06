@@ -10,6 +10,7 @@ authors = [{ name = "Ishan Singh Tomar" }]
 dependencies = [
     "anyio==4.16.0",
     "fastembed==0.9.1",
+    "httpx==0.28.1",
     "langchain-core==1.7.6",
     "langgraph==1.2.20",
     "langgraph-checkpoint-sqlite==3.1.3",
@@ -78,6 +79,7 @@ python_version = "3.12"
 strict = true
 mypy_path = "src,."
 files = ["src", "servers", "tests"]
+explicit_package_bases = true
 plugins = ["pydantic.mypy"]
 warn_unreachable = true
 
