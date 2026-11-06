@@ -145,6 +145,41 @@ make chat T=demo
 - **Checkpoint deserialization is allowlisted.** It only revives Sentinel's own state models.
   A test fails if a new model reachable from the state is not on the list.
 
+## Long-term memory (step h)
+
+Facts that outlive a thread live in a `MemoryBackend` (SQLite at `MEMORY_DB` by default; an
+OKF file backend is a stretch-goal stub). Every item carries `source` (the record it came
+from, or `user` / `mcp` / `agent`), `verified`, `stale`, `updated_at` and `confidence`.
+Search ranks fresh, verified items first.
+
+```bash
+uv run sentinel ask "Who owns the Q3 auth migration plan v2?" --auto-approve-memory   # fixture data only
+uv run sentinel memory list | search "auth migration owner" | put KEY "VALUE" | mark-stale KEY --reason "..."
+uv run python -m servers.memory_mcp.server       # the same memory over MCP (stdio)
+```
+
+- **Notes are never evidence.** `load_memory` puts matching notes in the prompt marked
+  verified or unverified, under the rule "not evidence, never cite". Citations can only point
+  at source records. For each verified note, the agent re-reads its source record (read-only
+  get) in the first hop, so the fresh record is what gets cited.
+- **Freshness rule.** A note conflicts with its source when the source record was superseded
+  by a newer record, or changed after the note was taken and no longer supports it. On
+  conflict the source wins: the note is dropped from the prompt for that turn and a
+  `mark_stale` write is proposed.
+- **Unverified memory never becomes fact.** The citation check removes any answer sentence
+  that restates an unverified note without support from the cited evidence, and reports it.
+- **Writes are writes.** After an answer, `save_memory` proposes storing the answer as a
+  verified fact (only if every sentence passed the citation check against records fetched
+  this turn), plus any `mark_stale` updates.
+  - With `DATA_MODE=live` every write stays `pending_approval`. The approval flow arrives
+    with the permission gate in Phase 3.
+  - With fixture data, writes are applied only with `--auto-approve-memory` or
+    `MEMORY_AUTO_APPROVE=true`. That setting is refused together with `DATA_MODE=live`.
+  - `sentinel memory put` is you writing directly, stored unverified with source `user`.
+- **Memory MCP server.** `search_memory` and `get_memory` are read-only; `put_memory` and
+  `mark_stale` are annotated as writes. Facts written over MCP are always stored unverified
+  with source `mcp`.
+
 ## Asking questions
 
 ```bash

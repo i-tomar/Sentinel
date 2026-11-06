@@ -16,7 +16,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 import anyio
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -33,8 +33,20 @@ from sentinel.graph.nodes.citation_check import check_answer
 from sentinel.graph.nodes.execute_tools import ToolExecutor, execute_calls
 from sentinel.graph.nodes.planner import Planner, RulePlanner
 from sentinel.graph.nodes.retrieve import assemble_evidence, relevant_chunks
-from sentinel.graph.nodes.tool_router import ready, route
-from sentinel.graph.nodes.verifier import decide, find_stale
+from sentinel.graph.nodes.save_memory import (
+    apply_writes,
+    fact_from_answer,
+    flag_conflicts,
+    propose_writes,
+)
+from sentinel.graph.nodes.tool_router import (
+    MEMORY_BUCKET,
+    memory_refresh_calls,
+    ready,
+    route,
+)
+from sentinel.graph.nodes.verifier import decide as decide_next
+from sentinel.graph.nodes.verifier import find_stale, superseded_by
 from sentinel.graph.state import (
     AgentState,
     CitationReport,
@@ -45,11 +57,16 @@ from sentinel.graph.state import (
     TurnRecord,
     new_turn_input,
 )
+from sentinel.memory.backend import MemoryBackend
+from sentinel.memory.freshness import find_conflicts
+from sentinel.memory.models import MemoryItem, MemoryWrite
+from sentinel.memory.policy import decide
 from sentinel.retrieval.models import SOURCES, Source
 from sentinel.retrieval.store import ChunkStore
 from sentinel.tracing import generation_attributes, set_text, trace_id_hex
 
 DEFAULT_K = 6
+MEMORY_NOTES = 5
 
 
 class Node(Protocol):
@@ -72,6 +89,11 @@ class Deps:
     sleep: Callable[[float], Awaitable[None]] = anyio.sleep
     checkpointer: BaseCheckpointSaver[Any] | None = None
     """Short-term memory per thread_id. None = every question starts from scratch."""
+    memory: MemoryBackend | None = None
+    """Long-term memory. None = nothing is recalled or saved across threads."""
+    data_mode: Literal["fixture", "live"] = "fixture"
+    memory_auto_approve: bool = False
+    """Write memory without approval; only honoured with fixture data (see memory.policy)."""
 
 
 def _model_name(llm: BaseChatModel) -> str:
@@ -98,6 +120,15 @@ def build_graph(deps: Deps) -> Any:
                 return await fn(state)
 
         return run
+
+    async def load_memory(state: AgentState) -> dict[str, Any]:
+        if deps.memory is None:
+            return {"memory_notes": []}
+        notes = deps.memory.search(state.question, MEMORY_NOTES)
+        with deps.tracer.start_as_current_span("memory.load") as span:
+            span.set_attribute("sentinel.memory.keys", [n.key for n in notes])
+            span.set_attribute("sentinel.memory.verified", sum(n.verified for n in notes))
+        return {"memory_notes": notes}
 
     async def plan(state: AgentState) -> dict[str, Any]:
         context = context_from(state.turns, state.documents)
@@ -128,6 +159,8 @@ def build_graph(deps: Deps) -> Any:
                 allowed_sources=state.sources,
                 widened=state.widened,
             )
+            if state.hops == 0:  # first hop: re-read the sources of verified memory notes
+                calls += memory_refresh_calls(state.memory_notes, hop)
         sq_docs = dict(state.sq_docs)
         for sq in batch:
             if sq.relation == "recall":  # evidence straight from this thread's memory
@@ -196,7 +229,7 @@ def build_graph(deps: Deps) -> Any:
             sq.id: bool(state.sq_docs.get(sq.id)) or (sq.relation == "search" and bool(index_keys))
             for sq in state.plan
         }
-        step, widen, unanswered = decide(
+        step, widen, unanswered = decide_next(
             state.plan,
             done,
             hops=state.hops,
@@ -220,6 +253,15 @@ def build_graph(deps: Deps) -> Any:
         }
 
     async def answer(state: AgentState) -> dict[str, Any]:
+        # Freshness rule: a note that conflicts with a newer source record is stale from now
+        # on in this turn, whether or not the persistent stale-marking is approved yet.
+        successors = superseded_by([*state.documents.values(), *state.index_chunks])
+        conflicts = find_conflicts(
+            state.memory_notes, state.documents, list(successors), successors
+        )
+        notes = flag_conflicts(
+            state.memory_notes, {c.key: (c.reason, c.superseded_by) for c in conflicts}
+        )
         evidence = assemble_evidence(
             state.question,
             state.plan,
@@ -227,12 +269,13 @@ def build_graph(deps: Deps) -> Any:
             state.sq_docs,
             state.index_chunks,
             state.stale_keys,
+            extra_buckets=[MEMORY_BUCKET],
         )
         if not evidence:
             draft = insufficient_answer(
                 state.question, state.sources, state.candidates, state.failures
             )
-            return {"draft": draft, "evidence": []}
+            return {"draft": draft, "evidence": [], "memory_notes": notes}
         messages = build_messages(
             state.question,
             evidence,
@@ -240,6 +283,7 @@ def build_graph(deps: Deps) -> Any:
             state.failures,
             state.unanswered,
             history=[t.question for t in state.turns][-3:],
+            memory_notes=notes,
         )
         with deps.tracer.start_as_current_span("llm.generate") as span:
             set_text(span, "langfuse.observation.input", str(messages[-1].content))
@@ -252,16 +296,37 @@ def build_graph(deps: Deps) -> Any:
             )
             text = reply.content if isinstance(reply.content, str) else str(reply.content)
             set_text(span, "langfuse.observation.output", text)
-        return {"draft": text, "evidence": evidence, "token_usage": state.token_usage + tokens}
+        return {
+            "draft": text,
+            "evidence": evidence,
+            "token_usage": state.token_usage + tokens,
+            "memory_notes": notes,
+        }
 
     async def citation_check(state: AgentState) -> dict[str, Any]:
-        final, used, report = check_answer(state.draft, state.evidence)
+        unverified = [n.value for n in state.memory_notes if not n.verified and not n.stale]
+        final, used, report = check_answer(state.draft, state.evidence, unverified)
         return {
             "answer": final,
             "citations": used,
             "citation_report": report,
             "insufficient_evidence": is_insufficient(final),
         }
+
+    async def save_memory(state: AgentState) -> dict[str, Any]:
+        if deps.memory is None:
+            return {"memory_writes": []}
+        decision = decide(deps.data_mode, deps.memory_auto_approve)
+        fact = fact_from_answer(
+            state.question, state.answer, state.citations, state.citation_report, state.evidence
+        )
+        conflicting = [n for n in state.memory_notes if n.stale]
+        existing = deps.memory.get(fact.key) if fact is not None else None
+        writes = apply_writes(propose_writes(conflicting, fact, existing), deps.memory, decision)
+        with deps.tracer.start_as_current_span("memory.save") as span:
+            span.set_attribute("sentinel.memory.decision", decision)
+            span.set_attribute("sentinel.memory.writes", [f"{w.op}:{w.status}" for w in writes])
+        return {"memory_writes": writes}
 
     async def record_turn(state: AgentState) -> dict[str, Any]:
         turn = TurnRecord(
@@ -280,6 +345,7 @@ def build_graph(deps: Deps) -> Any:
 
     graph = StateGraph(AgentState)
     for name, fn in (
+        ("load_memory", load_memory),
         ("plan", plan),
         ("route", route_node),
         ("execute_tools", execute),
@@ -287,10 +353,12 @@ def build_graph(deps: Deps) -> Any:
         ("verify", verify),
         ("answer", answer),
         ("citation_check", citation_check),
+        ("save_memory", save_memory),
         ("record_turn", record_turn),
     ):
         graph.add_node(name, traced(name, fn))
-    graph.add_edge(START, "plan")
+    graph.add_edge(START, "load_memory")
+    graph.add_edge("load_memory", "plan")
     graph.add_edge("plan", "route")
     graph.add_edge("route", "execute_tools")
     graph.add_edge("execute_tools", "retrieve")
@@ -299,7 +367,8 @@ def build_graph(deps: Deps) -> Any:
         "verify", lambda s: s.next_step, {"route": "route", "answer": "answer"}
     )
     graph.add_edge("answer", "citation_check")
-    graph.add_edge("citation_check", "record_turn")
+    graph.add_edge("citation_check", "save_memory")
+    graph.add_edge("save_memory", "record_turn")
     graph.add_edge("record_turn", END)
     return graph.compile(checkpointer=deps.checkpointer)
 
@@ -323,6 +392,9 @@ class AskResult(BaseModel):
     """Set when a checkpointer is configured; pass it back to continue the conversation."""
     turn: int
     """1 for a new thread (or no checkpointer), n for the n-th question of a thread."""
+    memory_notes: list[MemoryItem]
+    """Long-term memory consulted this turn (with this turn's conflicts flagged stale)."""
+    memory_writes: list[MemoryWrite]
     trace_id: str
     latency_ms: int
     token_usage: TokenUsage
@@ -381,6 +453,8 @@ async def ask_async(
         errors=state.errors,
         thread_id=thread_id,
         turn=len(state.turns),
+        memory_notes=state.memory_notes,
+        memory_writes=state.memory_writes,
         trace_id=trace_id,
         latency_ms=latency_ms,
         token_usage=state.token_usage,

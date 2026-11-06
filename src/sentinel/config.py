@@ -47,6 +47,8 @@ class Settings(BaseSettings):
     checkpoint_db: Path = Path("./.data/checkpoints.sqlite")
     memory_backend: MemoryBackendName = "sqlite"
     memory_db: Path = Path("./.data/memory.sqlite")
+    memory_auto_approve: bool = False
+    """Let the agent write long-term memory without approval. Fixture/eval data only."""
     okf_dir: Path = Path("./.data/okf")
 
     # Tracing
@@ -87,6 +89,15 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"LLM_PROVIDER={self.llm_provider} needs LLM_MODEL and LLM_API_KEY "
                 "(or use LLM_PROVIDER=mock)"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _no_memory_auto_approve_on_live_data(self) -> Settings:
+        if self.memory_auto_approve and self.data_mode == "live":
+            raise ValueError(
+                "MEMORY_AUTO_APPROVE is only allowed with DATA_MODE=fixture; live memory "
+                "writes always need approval"
             )
         return self
 

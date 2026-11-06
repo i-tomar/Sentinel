@@ -8,6 +8,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
 from sentinel.graph.state import Evidence, SubQuestion, ToolFailure
 from sentinel.llm import INSUFFICIENT_PREFIX
+from sentinel.memory.models import MemoryItem
 from sentinel.retrieval.models import Source
 
 SYSTEM_PROMPT = f"""You are Sentinel, an assistant that answers questions about a team's \
@@ -25,7 +26,10 @@ like [1] or [1][3]. Only cite numbers that appear in the evidence.
 Evidence marked stale="true" has been superseded by a newer record; never present it as current.
 6. If a source could not be read or a sub-question has no evidence, say which part of the \
 question you could not answer and why.
-7. Be concise."""
+7. Remembered notes are not evidence and must never be cited. Use them only to decide what to \
+look for in the evidence. Never state an unverified note as fact; if evidence disagrees with a \
+note, the evidence wins.
+8. Be concise."""
 
 MAX_ERROR_CHARS = 120
 
@@ -54,8 +58,19 @@ def build_messages(
     failures: Sequence[ToolFailure] = (),
     unanswered: Sequence[str] = (),
     history: Sequence[str] = (),
+    memory_notes: Sequence[MemoryItem] = (),
 ) -> list[BaseMessage]:
     parts = [f"Question: {question}"]
+    notes = [n for n in memory_notes if not n.stale]
+    if notes:
+        parts.append(
+            "Remembered notes (not evidence; never cite):\n"
+            + "\n".join(
+                f'<note verified="{str(n.verified).lower()}" source="{_attr(n.source)}" '
+                f'updated="{n.updated_at.date().isoformat()}">{_attr(n.value)}</note>'
+                for n in notes
+            )
+        )
     if history:
         parts.append(
             "Earlier questions in this conversation (for resolving references like "
