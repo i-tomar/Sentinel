@@ -120,6 +120,7 @@ async def test_three_hop_blocked_tickets_and_emails(
     assert keys >= BLOCKED_TICKETS
     assert keys >= {"gmail:thr-0003", "gmail:thr-0007", "gmail:thr-0009"}
     assert len({c.source for c in result.citations}) >= 2  # brief: citations from >=2 sources
+    assert "notion:auth-migration-v1" not in {c.key for c in result.citations}  # stale
     _assert_citations_resolve(result)
     _assert_read_only(result)
 
