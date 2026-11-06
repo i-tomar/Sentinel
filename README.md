@@ -85,6 +85,36 @@ make search Q="who owns the auth migration?"  # or: uv run sentinel search "..."
 Opt-in tests: `SENTINEL_TEST_QDRANT_URL=http://127.0.0.1:6333` (real Qdrant server, throwaway
 collection) and `SENTINEL_TEST_FASTEMBED=1` (downloads the local model).
 
+## Multi-hop planning and tool calls (step f)
+
+```
+plan -> route -> execute_tools -> retrieve -> verify --(next hop, <= MAX_HOPS)--> route
+                                                     \-> answer -> citation_check
+```
+
+```bash
+uv run sentinel ask "Which tickets are blocked by the auth migration and who emailed about them?" --as-of 2026-11-02
+uv run sentinel ask "..." --no-tools      # index only, no live MCP calls
+```
+
+- **Planner.** Splits the question into typed sub-questions: id, text, target sources,
+  dependencies, relation (`search`, `blocked_by`, `mentions`), keyword query, and optional
+  time window or label. It only ever sees the user's question, so retrieved content cannot
+  change the plan. The mock provider uses a deterministic rule planner. Real providers use an
+  LLM planner whose JSON is validated, with the rule plan as fallback.
+- **Tool router.** Turns ready sub-questions into calls from a read-only allowlist (search and
+  get per source). Dependent hops take only strictly-matched ticket keys (at most 6) from
+  earlier, non-stale results. "Last week" is resolved against `--as-of` (Monday-based weeks).
+- **execute_tools.** Each call gets a `TOOL_TIMEOUT_S` timeout and up to 2 retries with
+  exponential backoff. Failures are recorded and the answer names the unreadable source
+  instead of failing.
+- **Verifier.** Routes the next ready sub-question, retries an empty search once over the
+  other allowed sources, and marks superseded Notion pages (same title apart from a
+  version/year) as stale so they aren't followed or presented as current. It stops at
+  `MAX_HOPS`, and unanswered sub-questions are listed.
+- **Writes.** No write or destructive tool is reachable yet. That arrives with the permission
+  gate in Phase 3.
+
 ## Asking questions
 
 ```bash
