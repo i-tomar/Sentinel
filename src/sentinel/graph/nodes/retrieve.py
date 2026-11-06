@@ -31,11 +31,13 @@ def assemble_evidence(
     index_chunks: Iterable[Chunk],
     stale_keys: Iterable[str],
     *,
+    extra_buckets: Sequence[str] = (),
     max_items: int = MAX_EVIDENCE,
     max_chars: int = MAX_EVIDENCE_CHARS,
 ) -> list[Evidence]:
-    """Records fetched by tools come first, in plan order (fresh data, targeted lookups);
-    then relevant index chunks. One numbered evidence item per record."""
+    """Records fetched by tools come first, in plan order (fresh data, targeted lookups),
+    then records in `extra_buckets` (e.g. re-fetched sources of memory notes), then relevant
+    index chunks. One numbered evidence item per record."""
     stale = set(stale_keys)
     resolver = CitationResolver()
     items: dict[int, Evidence] = {}
@@ -53,8 +55,8 @@ def assemble_evidence(
             raise RuntimeError(f"citation {n} vanished")
         items[n] = Evidence(citation=citation, text=text[:max_chars], score=1.0, stale=key in stale)
 
-    for sq in plan:
-        for key in sq_docs.get(sq.id, []):
+    for bucket in [*(sq.id for sq in plan), *extra_buckets]:
+        for key in sq_docs.get(bucket, []):
             doc = documents.get(key)
             if doc is not None and len(items) < max_items:
                 put(resolver.add_document(doc).n, key, doc.text)

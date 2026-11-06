@@ -15,6 +15,7 @@ from sentinel.citations import Citation, cited_numbers
 from sentinel.graph.nodes.answerer import is_insufficient
 from sentinel.graph.state import CitationReport, Evidence, UnsupportedClaim
 from sentinel.llm import INSUFFICIENT_PREFIX, PARTIAL_PREFIX
+from sentinel.memory.freshness import support as memory_support
 from sentinel.text import content_tokens, split_sentences
 
 SUPPORT_THRESHOLD = 0.5
@@ -36,9 +37,13 @@ def _sentences_with_markers(text: str) -> list[str]:
 
 
 def check_answer(
-    draft: str, evidence: Sequence[Evidence]
+    draft: str, evidence: Sequence[Evidence], unverified_memory: Sequence[str] = ()
 ) -> tuple[str, list[Citation], CitationReport]:
-    """Return (final answer, citations actually used, report)."""
+    """Return (final answer, citations actually used, report).
+
+    `unverified_memory` holds values of unverified memory notes shown to the model; a
+    sentence that restates one without support from cited evidence is removed.
+    """
     by_n = {ev.citation.n: ev for ev in evidence}
     unknown = [n for n in cited_numbers(draft) if n not in by_n]
     answer = _MARKER.sub(lambda m: "" if int(m.group(1)) in unknown else m.group(0), draft)
@@ -51,21 +56,35 @@ def check_answer(
             words = content_tokens(_MARKER.sub("", sentence))
             if not words or sentence.startswith((PARTIAL_PREFIX, INSUFFICIENT_PREFIX)):
                 continue
+            support = 0.0
+            if cited:
+                support_words = set().union(
+                    *(
+                        content_tokens(f"{c.doc_id}\n{c.title}\n{by_n[n].text}")
+                        for n in cited
+                        for c in (by_n[n].citation,)
+                    )
+                )
+                support = len(words & support_words) / len(words)
+            if support < SUPPORT_THRESHOLD and any(
+                memory_support(value, sentence) >= SUPPORT_THRESHOLD for value in unverified_memory
+            ):
+                report.unverified_memory_claims.append(sentence)
+                continue
             if not cited:
                 report.uncited_sentences.append(sentence)
-                continue
-            support_words = set().union(
-                *(
-                    content_tokens(f"{c.doc_id}\n{c.title}\n{by_n[n].text}")
-                    for n in cited
-                    for c in (by_n[n].citation,)
-                )
-            )
-            support = len(words & support_words) / len(words)
-            if support < SUPPORT_THRESHOLD:
+            elif support < SUPPORT_THRESHOLD:
                 report.unsupported.append(
                     UnsupportedClaim(sentence=sentence, cited=cited, support=round(support, 3))
                 )
+    for sentence in report.unverified_memory_claims:
+        answer = answer.replace(sentence, "")
+    if report.unverified_memory_claims:
+        answer = re.sub(r"[ \t]{2,}", " ", answer).strip() or INSUFFICIENT_PREFIX + "."
+        answer += (
+            f"\n\n(Removed {len(report.unverified_memory_claims)} statement(s) that only "
+            "unverified memory supports.)"
+        )
     if unknown:
         listed = ", ".join(str(n) for n in unknown)
         answer += f"\n\n(Removed citation number(s) {listed}: no retrieved source has them.)"

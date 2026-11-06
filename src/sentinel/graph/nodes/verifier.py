@@ -22,7 +22,8 @@ def topic_key(title: str) -> str:
     return " ".join(_VERSION_MARKERS.sub(" ", title).lower().split())
 
 
-def find_stale(records: Iterable[Document | Chunk]) -> list[str]:
+def superseded_by(records: Iterable[Document | Chunk]) -> dict[str, str]:
+    """Stale Notion record key -> key of the newest record on the same topic."""
     newest: dict[str, tuple[str, float]] = {}
     groups: dict[str, set[str]] = defaultdict(set)
     for r in records:
@@ -34,8 +35,13 @@ def find_stale(records: Iterable[Document | Chunk]) -> list[str]:
         ts = r.updated_at.timestamp()
         if topic not in newest or ts > newest[topic][1]:
             newest[topic] = (key, ts)
-    stale = {k for topic, keys in groups.items() for k in keys if k != newest[topic][0]}
-    return sorted(stale)
+    return {
+        k: newest[topic][0] for topic, keys in groups.items() for k in keys if k != newest[topic][0]
+    }
+
+
+def find_stale(records: Iterable[Document | Chunk]) -> list[str]:
+    return sorted(superseded_by(records))
 
 
 def decide(

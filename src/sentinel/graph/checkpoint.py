@@ -27,6 +27,7 @@ from sentinel.graph.state import (
     TurnRecord,
     UnsupportedClaim,
 )
+from sentinel.memory.models import MemoryItem, MemoryWrite
 from sentinel.retrieval.models import Chunk, Document
 
 STATE_MODELS: tuple[type[BaseModel], ...] = (
@@ -35,6 +36,8 @@ STATE_MODELS: tuple[type[BaseModel], ...] = (
     CitationReport,
     Document,
     Evidence,
+    MemoryItem,
+    MemoryWrite,
     SubQuestion,
     TokenUsage,
     ToolCall,

@@ -123,6 +123,15 @@ async def execute_calls(
             fail(call, call.tool, error, attempts)
             continue
         spec = SOURCE_TOOLS[call.source]
+        if call.tool == spec.get_tool:  # direct fetch (e.g. re-reading a memory's source)
+            try:
+                doc = NORMALIZERS[call.source](result, datetime.now(UTC))
+            except ValueError as exc:
+                fail(call, call.tool, f"unexpected record ({type(exc).__name__})", attempts)
+                continue
+            out.documents[doc.key] = doc  # fresher than any remembered copy
+            out.sq_docs[call.sub_question_id] = list(dict.fromkeys([*keys, doc.key]))
+            continue
         try:
             ids = [str(r[spec.id_field]) for r in result["results"]][: call.expand]
         except (KeyError, TypeError) as exc:

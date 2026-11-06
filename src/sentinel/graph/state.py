@@ -9,6 +9,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from sentinel.citations import Citation
+from sentinel.memory.models import MemoryItem, MemoryWrite
 from sentinel.retrieval.models import SOURCES, Chunk, Document, Source
 
 Relation = Literal["search", "blocked_by", "mentions", "recall"]
@@ -121,10 +122,17 @@ class CitationReport(BaseModel):
     """Markers that matched no retrieved evidence; removed from the final answer."""
     uncited_sentences: list[str] = Field(default_factory=list)
     unsupported: list[UnsupportedClaim] = Field(default_factory=list)
+    unverified_memory_claims: list[str] = Field(default_factory=list)
+    """Sentences backed only by unverified memory; removed from the final answer."""
 
     @property
     def ok(self) -> bool:
-        return not (self.unknown or self.uncited_sentences or self.unsupported)
+        return not (
+            self.unknown
+            or self.uncited_sentences
+            or self.unsupported
+            or self.unverified_memory_claims
+        )
 
 
 class TurnRecord(BaseModel):
@@ -181,6 +189,11 @@ class AgentState(BaseModel):
     insufficient_evidence: bool = False
     token_usage: TokenUsage = Field(default_factory=TokenUsage)
     errors: list[str] = Field(default_factory=list)
+
+    # long-term memory (per turn): notes loaded for this question and writes requested
+    memory_notes: list[MemoryItem] = Field(default_factory=list)
+    """Loaded notes; conflicting ones are flagged stale here even before the write lands."""
+    memory_writes: list[MemoryWrite] = Field(default_factory=list)
 
     # short-term memory: survives turns of the same thread via the checkpointer
     turns: list[TurnRecord] = Field(default_factory=list)

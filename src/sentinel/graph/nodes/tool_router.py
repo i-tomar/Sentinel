@@ -14,6 +14,7 @@ from datetime import date, datetime, timedelta
 
 from sentinel.graph.state import SubQuestion, TimeWindow, ToolCall
 from sentinel.mcp_clients.tools import READ_TOOLS, SOURCE_TOOLS
+from sentinel.memory.models import MemoryItem
 from sentinel.retrieval.models import Document, Source
 
 SEARCH_LIMIT = 5
@@ -42,6 +43,42 @@ def ticket_keys(docs: Iterable[Document]) -> list[str]:
             keys.append(doc.id)
         keys.extend(_TICKET_KEY.findall(f"{doc.title}\n{doc.text}"))
     return list(dict.fromkeys(keys))
+
+
+MEMORY_BUCKET = "memory"
+MAX_MEMORY_REFRESH = 4
+
+
+def memory_refresh_calls(notes: Sequence[MemoryItem], hop: int) -> list[ToolCall]:
+    """Re-fetch the source record of each verified, fresh memory note (read-only get), so the
+    record is what gets cited and the freshness rule can compare it with the note."""
+    sources: dict[str, Source] = {s: s for s in SOURCE_TOOLS}
+    calls: list[ToolCall] = []
+    seen: set[str] = set()
+    for note in notes:
+        record = note.source_record
+        if note.stale or not note.verified or record is None or record in seen:
+            continue
+        name, record_id = record.split(":", 1)
+        source = sources.get(name)
+        if source is None:
+            continue
+        seen.add(record)
+        spec = SOURCE_TOOLS[source]
+        calls.append(
+            ToolCall(
+                id=f"h{hop}-m{len(calls) + 1}",
+                sub_question_id=MEMORY_BUCKET,
+                hop=hop,
+                source=source,
+                tool=spec.get_tool,
+                args={spec.get_arg: record_id},
+                expand=1,
+            )
+        )
+        if len(calls) >= MAX_MEMORY_REFRESH:
+            break
+    return calls
 
 
 def ready(plan: Sequence[SubQuestion], done: Sequence[str]) -> list[SubQuestion]:
