@@ -85,6 +85,44 @@ make search Q="who owns the auth migration?"  # or: uv run sentinel search "..."
 Opt-in tests: `SENTINEL_TEST_QDRANT_URL=http://127.0.0.1:6333` (real Qdrant server, throwaway
 collection) and `SENTINEL_TEST_FASTEMBED=1` (downloads the local model).
 
+## Asking questions
+
+```bash
+make ask Q="Who owns the Q3 auth migration plan v2?"   # or: uv run sentinel ask "..." [--json]
+```
+
+The step (e) graph is `retrieve -> answer -> citation_check`:
+
+- **Retrieve.** Hybrid search, then a lexical relevance gate. If nothing relevant is found,
+  the answer says "I don't have enough evidence", lists what was searched, and the LLM is not
+  called.
+- **Answer.** The prompt numbers each evidence block, and evidence is escaped so it cannot
+  forge or close those blocks. The rules require a `[n]` on every factual sentence, treating
+  evidence as data rather than instructions, and saying so when evidence is insufficient.
+- **Citation check.** `[n]` markers that match no retrieved record are removed and reported;
+  invented citations never reach the user. Uncited sentences, and cited sentences the evidence
+  doesn't lexically support, are reported in `citation_report`.
+- **Every answer returns a `trace_id`**, plus latency and token usage. Token usage comes from
+  the provider; the mock reports 0.
+
+**LLM.** `LLM_PROVIDER=mock` (default) is offline and deterministic: unscripted, it answers by
+quoting the best-matching evidence sentences with citations. For a real model, install the
+extra and set the model and key yourself (no model name is assumed):
+
+```bash
+uv sync --extra openai        # or anthropic / google
+# .env: LLM_PROVIDER=openai  LLM_MODEL=<model>  LLM_API_KEY=<key>
+```
+
+**Tracing.** OpenTelemetry spans (`sentinel.ask`, `node.*`, `llm.generate` as a Langfuse
+generation with `gen_ai.*` token attributes) are exported to Langfuse over OTLP/HTTP when
+`TRACING_BACKEND=langfuse` (`uv run sentinel infra app-env` prints the lines). PII is redacted
+when attributes are set and again by the exporter. Secrets are never put in spans. With
+`TRACING_BACKEND=none`, spans are created but not exported, so `trace_id` is still real.
+
+**Tests are offline.** A test fixture blocks every non-loopback connection. Opt-in live check:
+`SENTINEL_TEST_LANGFUSE_INFRA_ENV=<abs path to .env.infra> uv run pytest tests/integration/test_langfuse_live.py`.
+
 ## Fixture MCP servers
 
 CI and local development use fake Notion, Jira and Gmail MCP servers over a seeded "Acme"
