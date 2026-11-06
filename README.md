@@ -285,12 +285,65 @@ tests' positive control.
   never flagged.
 - **Other paths.** The index-only path, recalled memory and quote mode are covered too.
 
+**Known limitation: search ranking.** The guard runs on what a search returns, after the
+server has already ranked and cut the results. A poisoned record whose injected words match
+the query can push a legitimate record out of the top results. The guard can then remove
+the poisoned record, but it cannot recover the legitimate one the server never returned. The
+answer can therefore miss a relevant record, though no injected instruction gets through.
+The test suite keeps this visible:
+
+- The general assertions stay strict for every poisoned question: the same plan as the clean
+  twin, no tool call the clean twin doesn't make, and no new evidence apart from the poisoned
+  records.
+- One regression case (the PROJ-155 question, where PROJ-163 outranks PROJ-168) is exempt
+  only from the exact-match check, with a comment explaining why.
+
 Not covered yet:
 
-- User-question guarding (an input-guard node) is not wired into the graph yet.
 - PII redaction of retrieved text is step (m).
 - The approval gate for write tools is step (l). The fixture agent has no write tools, so
   "no extra tools" here means no extra read calls.
+
+## Input guard
+
+`input_guard` is the first node of every turn, follow-ups included. It scans the user's
+question with the step (j) detector (`origin="user"`, `INJECTION_THRESHOLD`).
+
+**When a question is flagged:**
+
+- The turn ends right there. Long-term memory isn't read, nothing is planned or searched, no
+  MCP tool and no model is called, and nothing is saved.
+- The reply starts with `I can't run this request`, names the matched rules and says nothing
+  was run. The CLI also prints `input guard: blocked (score ...; rules ...)`, and the trace
+  records `guard.input` and `sentinel.input_blocked`.
+- The question is **not** added to the thread's short-term memory. It never reaches a later
+  prompt as an "earlier question", the turn counter does not advance, and the next follow-up
+  resolves against the last accepted turn.
+
+**What it is and isn't:**
+
+- **A safety signal, not a permission system.** It stops obvious attempts early and cheaply.
+  It does not make an accepted question trusted: a question that passes gets no extra
+  powers.
+- **Not a guarantee.** The detector is heuristic and will miss attacks it has no rule for
+  (paraphrases, new languages, attacks spread over several turns). Writes will still need
+  approval from the step (l) permission gate whatever this guard decides, and retrieved data
+  is still guarded separately.
+- **False positives refuse a legitimate question.** The user can rephrase it without
+  instructions addressed to the assistant.
+- `Deps(input_detector=None)` disables it (experiments and the tests' positive control only).
+
+**How it is tested** (`tests/integration/test_input_guard.py`, fixture servers, MockLLM):
+
+- **Blocked questions.** All 17 adversarial user prompts are blocked with zero tool calls, no
+  plan, no LLM call (even with the LLM planner configured), no memory read and no memory
+  write, even with auto-approve on.
+- **Positive control.** With the guard off, the same attack is planned and searched.
+- **Ordinary questions.** All 16 benign samples pass, including security discussions. The
+  3-hop question gives the same answer and tool calls as with the guard off. The two
+  security-training questions retrieve and cite the training page.
+- **Follow-ups.** In a checkpointed thread, a malicious follow-up is blocked and not
+  remembered. The next real follow-up still resolves "them" to the first turn's tickets.
 
 ## Asking questions
 
