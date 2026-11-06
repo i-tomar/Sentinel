@@ -1826,6 +1826,7 @@ source = { editable = "." }
 dependencies = [
     { name = "anyio" },
     { name = "fastembed" },
+    { name = "httpx" },
     { name = "langchain-core" },
     { name = "langgraph" },
     { name = "langgraph-checkpoint-sqlite" },
@@ -1860,6 +1861,7 @@ dev = [
 requires-dist = [
     { name = "anyio", specifier = "==4.16.0" },
     { name = "fastembed", specifier = "==0.9.1" },
+    { name = "httpx", specifier = "==0.28.1" },
     { name = "langchain-anthropic", marker = "extra == 'anthropic'", specifier = "==1.7.10" },
     { name = "langchain-core", specifier = "==1.7.6" },
     { name = "langchain-google-genai", marker = "extra == 'google'", specifier = "==4.4.3" },

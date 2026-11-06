@@ -180,6 +180,29 @@ uv run python -m servers.memory_mcp.server       # the same memory over MCP (std
   `mark_stale` are annotated as writes. Facts written over MCP are always stored unverified
   with source `mcp`.
 
+## Live connectors (step i): read-only, opt-in
+
+Fixture mode stays the default; CI and tests never touch a real account (a socket guard fails
+any test that tries). With `DATA_MODE=live`, Sentinel launches small **read-only MCP servers**
+(`servers/live/`) that expose exactly the fixture read tools, so ingestion and the agent run
+unchanged. Enable sources one at a time with `LIVE_SOURCES` (Notion, then Jira, then Gmail).
+
+| Source | Env vars | Calls (all others are blocked by an allowlist guard) |
+|---|---|---|
+| Notion | `NOTION_TOKEN` (internal integration; share only pages it may read) | `POST /v1/search`, `GET /v1/pages/{id}`, `GET /v1/blocks/{id}/children`, `Notion-Version: 2026-03-11` |
+| Jira Cloud | `JIRA_BASE_URL` (https), `JIRA_EMAIL`, `JIRA_API_TOKEN`, optional `JIRA_PROJECT_KEYS` | `GET /rest/api/3/search/jql`, `GET /rest/api/3/issue/{key}` |
+| Gmail | `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`, `GMAIL_REFRESH_TOKEN` | token refresh, `GET users/me/threads`, `GET users/me/threads/{id}`; scope `gmail.readonly` only, broader grants are refused |
+
+```bash
+uv run sentinel live check                   # no network: what is configured / missing
+uv run sentinel live gmail-auth              # one-time Google consent (gmail.readonly), prints GMAIL_REFRESH_TOKEN
+DATA_MODE=live uv run sentinel live smoke -s notion --yes   # 1 search (limit 1) + 1 fetch; prints counts/ids only
+DATA_MODE=live uv run sentinel ingest        # capped at LIVE_MAX_RECORDS per source; a capped run deletes nothing
+```
+
+Each live server process receives only its own source's credentials. Memory auto-approve is
+refused in live mode. No live call has been run by the project yet.
+
 ## Asking questions
 
 ```bash
