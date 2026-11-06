@@ -10,8 +10,8 @@ S ?=
 help: ## List targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-12s %s\n", $$1, $$2}'
 
-sync: ## Install pinned deps (incl. dev group) into .venv
-	$(UV) sync --locked
+sync: ## Install pinned deps (dev group + optional LLM provider extras) into .venv
+	$(UV) sync --locked --all-extras
 
 lint: ## ruff lint + format check + mypy
 	$(UV) run ruff check .
@@ -70,8 +70,8 @@ ingest: ## Sync fixture records (over MCP) into Qdrant; idempotent
 search: ## Debug retrieval: make search Q="auth migration owner"
 	$(UV) run sentinel search "$(Q)"
 
-ask: ## Ask one question: make ask Q="..."              [step e]
-	@echo "not implemented yet: lands in Phase 1 step e" && exit 1
+ask: ## Ask one question with citations: make ask Q="..."
+	$(UV) run sentinel ask "$(Q)"
 
 chat: ## Multi-turn chat with a thread id               [step g]
 	@echo "not implemented yet: lands in Phase 2 step g" && exit 1

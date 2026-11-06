@@ -10,7 +10,11 @@ authors = [{ name = "Ishan Singh Tomar" }]
 dependencies = [
     "anyio==4.16.0",
     "fastembed==0.9.1",
+    "langchain-core==1.7.6",
+    "langgraph==1.2.20",
     "mcp==2.3.0",
+    "opentelemetry-exporter-otlp-proto-http==1.45.2",
+    "opentelemetry-sdk==1.45.2",
     "pydantic==2.14.3",
     "pydantic-settings==2.16.2",
     "qdrant-client==1.20.0",
@@ -19,6 +23,17 @@ dependencies = [
 
 [project.scripts]
 sentinel = "sentinel.cli:app"
+
+[project.optional-dependencies]
+openai = [
+    "langchain-openai==1.7.4",
+]
+anthropic = [
+    "langchain-anthropic==1.7.10",
+]
+google = [
+    "langchain-google-genai==4.4.3",
+]
 
 [dependency-groups]
 dev = [
@@ -76,4 +91,9 @@ addopts = ["-ra", "--strict-markers", "--strict-config", "--import-mode=importli
 markers = [
     "unit: fast, isolated tests with no I/O beyond tmp_path",
     "integration: tests that talk to MCP servers (in-process or subprocess) or run the graph",
+    "network: opt-in tests allowed to reach the internet (e.g. model downloads)",
+]
+filterwarnings = [
+    # google-genai 3.0.0 ships docstrings with invalid escapes; not ours to fix.
+    "ignore:invalid escape sequence:SyntaxWarning",
 ]

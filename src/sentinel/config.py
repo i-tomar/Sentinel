@@ -82,6 +82,15 @@ class Settings(BaseSettings):
         return value
 
     @model_validator(mode="after")
+    def _llm_provider_has_credentials(self) -> Settings:
+        if self.llm_provider != "mock" and not (self.llm_model and self.llm_api_key):
+            raise ValueError(
+                f"LLM_PROVIDER={self.llm_provider} needs LLM_MODEL and LLM_API_KEY "
+                "(or use LLM_PROVIDER=mock)"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _tracing_backend_has_credentials(self) -> Settings:
         if self.tracing_backend == "langfuse" and not (
             self.langfuse_public_key and self.langfuse_secret_key

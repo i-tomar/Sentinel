@@ -14,12 +14,15 @@ import typer
 from sentinel import __version__, infra
 from sentinel.citations import CitationResolver
 from sentinel.config import get_settings
+from sentinel.graph.build import Deps, ask
+from sentinel.llm import make_chat_model
 from sentinel.mcp_clients.pool import open_clients
 from sentinel.retrieval.embed import make_embedder
 from sentinel.retrieval.ingest import SourceReport
 from sentinel.retrieval.ingest import ingest as ingest_sources
 from sentinel.retrieval.models import SOURCES, SearchMode, Source
 from sentinel.retrieval.store import ChunkStore, make_qdrant_client
+from sentinel.tracing import build_tracer_provider, get_tracer
 
 app = typer.Typer(name="sentinel", no_args_is_help=True, add_completion=False)
 infra_app = typer.Typer(no_args_is_help=True, help="Local Docker Compose infrastructure.")
@@ -116,6 +119,43 @@ def search(
         citation = resolver.add(hit.chunk)
         typer.echo(f"{hit.score:.4f} [{citation.n}] {hit.chunk.doc_key}#{hit.chunk.index}")
     typer.echo(resolver.render())
+
+
+@app.command("ask")
+def ask_command(
+    question: str,
+    source: SourceOption = None,
+    k: Annotated[int, typer.Option("-k", min=1, max=20, help="Chunks to retrieve.")] = 6,
+    as_json: Annotated[bool, typer.Option("--json", help="Print the full result as JSON.")] = False,
+) -> None:
+    """Answer a question from indexed evidence, with citations and a trace id."""
+    settings = get_settings()
+    provider = build_tracer_provider(settings)
+    try:
+        with _open_store() as store:
+            store.ensure_collection()
+            deps = Deps(
+                store=store, llm=make_chat_model(settings), tracer=get_tracer(provider), k=k
+            )
+            result = ask(question, deps, _sources(source))
+    finally:
+        provider.shutdown()  # flushes spans to the tracing backend, if any
+    if as_json:
+        typer.echo(result.model_dump_json(indent=2))
+        return
+    typer.echo(result.answer)
+    if result.citations:
+        typer.echo("\nSources:")
+        for citation in result.citations:
+            typer.echo(citation.render())
+    if not result.citation_report.ok:
+        typer.echo(f"\ncitation check: {result.citation_report.model_dump_json()}")
+    usage = result.token_usage
+    typer.echo(
+        f"\ntrace_id={result.trace_id} latency_ms={result.latency_ms} "
+        f"tokens_in={usage.input_tokens} tokens_out={usage.output_tokens} "
+        f"tracing={settings.tracing_backend} llm={settings.llm_provider}"
+    )
 
 
 @infra_app.command("init")

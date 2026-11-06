@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 from pathlib import Path
 
 import pytest
@@ -42,6 +44,32 @@ def test_ingest_twice_then_search_with_citations() -> None:
         and "https://jira.fixture.acme.test/browse/PROJ-142" in line
         for line in lines
     )
+
+
+def test_ask_prints_cited_answer_sources_and_trace_id() -> None:
+    assert runner.invoke(app, ["ingest", "-s", "notion"]).exit_code == 0
+    result = runner.invoke(app, ["ask", "Who owns the Q3 auth migration plan v2?"])
+    assert result.exit_code == 0, result.output
+    out = result.stdout
+    assert "Sources:" in out
+    assert "Notion: Q3 Auth Migration Plan (v2) (auth-migration-v2)" in out
+    assert re.search(r"trace_id=[0-9a-f]{32} ", out)
+    assert "tracing=none llm=mock" in out
+
+    as_json = runner.invoke(app, ["ask", "Who owns the Q3 auth migration plan v2?", "--json"])
+    payload = json.loads(as_json.stdout)
+    assert payload["citations"]
+    assert payload["citation_report"]["unknown"] == []
+    assert re.fullmatch(r"[0-9a-f]{32}", payload["trace_id"])
+
+
+def test_ask_without_evidence_says_so() -> None:
+    assert runner.invoke(app, ["ingest", "-s", "notion"]).exit_code == 0
+    result = runner.invoke(app, ["ask", "What is the capital of France?"])
+    assert result.exit_code == 0, result.output
+    assert result.stdout.startswith("I don't have enough evidence")
+    assert "Sources:" not in result.stdout
+    assert "trace_id=" in result.stdout
 
 
 def test_ingest_reports_injected_source_failure(monkeypatch: pytest.MonkeyPatch) -> None:

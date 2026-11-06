@@ -70,6 +70,7 @@ def test_make_embedder() -> None:
         make_embedder(Settings(embedding_provider="openai"))
 
 
+@pytest.mark.network
 @pytest.mark.skipif(
     os.environ.get("SENTINEL_TEST_FASTEMBED") != "1",
     reason="downloads a ~70 MB model; set SENTINEL_TEST_FASTEMBED=1 to run",
