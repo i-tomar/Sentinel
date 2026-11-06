@@ -1,25 +1,29 @@
-"""Typed agent state. Later steps add memory and approvals."""
+"""Typed agent state. Short-term memory (per thread) lives in `turns` and `documents`."""
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from sentinel.citations import Citation
 from sentinel.retrieval.models import SOURCES, Chunk, Document, Source
 
-Relation = Literal["search", "blocked_by", "mentions"]
+Relation = Literal["search", "blocked_by", "mentions", "recall"]
 """search: keyword search in the target sources.
 blocked_by: Jira issues blocked by ticket keys found in the dependency's records.
-mentions: email threads mentioning Jira tickets found by the dependency."""
+mentions: email threads mentioning Jira tickets found by the dependency.
+recall: answer from records already fetched earlier in this thread (no tool calls)."""
 
 TimeWindow = Literal["last_week", "this_week", "last_7_days"]
+RECORD_KEY_PATTERN = r"^(notion|jira|gmail):[\w.-]{1,100}$"
 
 
 class SubQuestion(BaseModel):
-    """One step of the plan. Derived from the user question only, never from retrieved data."""
+    """One step of the plan. Derived from the user's questions only, never from retrieved
+    text; `prior_keys` are opaque ids of records this thread already fetched."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -27,10 +31,19 @@ class SubQuestion(BaseModel):
     text: str = Field(min_length=1, max_length=300)
     target_sources: list[Source] = Field(min_length=1)
     depends_on: list[str] = Field(default_factory=list)
+    prior_keys: list[str] = Field(default_factory=list, max_length=12)
+    """Records from earlier turns this sub-question builds on (follow-ups)."""
     relation: Relation = "search"
     query: str = Field(default="", max_length=200)
     time_window: TimeWindow | None = None
     label: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9-]{0,30}$")
+
+    @model_validator(mode="after")
+    def _prior_keys_are_record_keys(self) -> SubQuestion:
+        bad = [k for k in self.prior_keys if not re.match(RECORD_KEY_PATTERN, k)]
+        if bad:
+            raise ValueError(f"invalid record keys {bad}")
+        return self
 
 
 class Plan(BaseModel):
@@ -47,7 +60,9 @@ class Plan(BaseModel):
             unknown = [d for d in sq.depends_on if d not in seen]
             if unknown:
                 raise ValueError(f"{sq.id} depends on unknown or later ids {unknown}")
-            if sq.relation != "search" and not sq.depends_on:
+            if sq.relation == "recall" and (sq.depends_on or not sq.prior_keys):
+                raise ValueError(f"{sq.id}: recall needs prior_keys and no depends_on")
+            if sq.relation in ("blocked_by", "mentions") and not (sq.depends_on or sq.prior_keys):
                 raise ValueError(f"{sq.id}: relation {sq.relation} needs a dependency")
             seen.add(sq.id)
         return self
@@ -112,6 +127,20 @@ class CitationReport(BaseModel):
         return not (self.unknown or self.uncited_sentences or self.unsupported)
 
 
+class TurnRecord(BaseModel):
+    """What a finished turn leaves in the thread's short-term memory."""
+
+    question: str
+    answer: str
+    as_of: datetime
+    plan: list[SubQuestion]
+    unanswered: list[str]
+    sq_docs: dict[str, list[str]]
+    evidence_keys: list[str]
+    cited_keys: list[str]
+    failed_sources: list[Source]
+
+
 class AgentState(BaseModel):
     question: str
     sources: list[Source] = Field(default_factory=lambda: list(SOURCES))
@@ -152,3 +181,19 @@ class AgentState(BaseModel):
     insufficient_evidence: bool = False
     token_usage: TokenUsage = Field(default_factory=TokenUsage)
     errors: list[str] = Field(default_factory=list)
+
+    # short-term memory: survives turns of the same thread via the checkpointer
+    turns: list[TurnRecord] = Field(default_factory=list)
+
+
+MEMORY_FIELDS = frozenset({"documents", "turns"})
+"""Fields carried across turns of a thread. Every other field is reset for each new turn."""
+
+
+def new_turn_input(question: str, sources: list[Source], as_of: datetime) -> dict[str, Any]:
+    """Graph input for a new turn: fresh per-turn fields, memory fields omitted so the
+    checkpointer keeps the thread's previous values (or the defaults for a new thread)."""
+    fresh = AgentState(question=question, sources=sources, as_of=as_of)
+    return {
+        name: getattr(fresh, name) for name in AgentState.model_fields if name not in MEMORY_FIELDS
+    }
