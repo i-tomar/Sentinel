@@ -25,6 +25,9 @@ from sentinel.graph.nodes.execute_tools import MCPToolExecutor
 from sentinel.graph.nodes.planner import make_planner
 from sentinel.llm import make_chat_model
 from sentinel.mcp_clients.pool import open_clients
+from sentinel.memory.backend import MemoryBackend
+from sentinel.memory.models import MemoryItem
+from sentinel.memory.policy import make_memory_backend
 from sentinel.retrieval.embed import make_embedder
 from sentinel.retrieval.ingest import SourceReport
 from sentinel.retrieval.ingest import ingest as ingest_sources
@@ -142,6 +145,7 @@ def ask_command(
         datetime | None,
         typer.Option(formats=["%Y-%m-%d"], help="Date treated as today, e.g. for 'last week'."),
     ] = None,
+    auto_approve_memory: AutoApproveMemory = False,
 ) -> None:
     """Plan, call tools over several hops, and answer with citations and a trace id."""
     settings = get_settings()
@@ -149,11 +153,12 @@ def ask_command(
     if tools and settings.data_mode == "live":
         typer.echo("DATA_MODE=live connectors arrive in step (i); use --no-tools.", err=True)
         raise typer.Exit(2)
+    auto_approve = _memory_auto_approve(settings, auto_approve_memory)
     today = as_of.replace(tzinfo=UTC) if as_of else None
     provider = build_tracer_provider(settings)
 
     async def run(store: ChunkStore) -> AskResult:
-        deps = _agent_deps(settings, store, provider, k)
+        deps = _agent_deps(settings, store, provider, k, auto_approve)
         async with _tool_access(settings, sources, deps, tools):
             return await ask_async(question, deps, sources, today)
 
@@ -191,6 +196,7 @@ def chat(
         datetime | None,
         typer.Option(formats=["%Y-%m-%d"], help="Date treated as today, e.g. for 'last week'."),
     ] = None,
+    auto_approve_memory: AutoApproveMemory = False,
 ) -> None:
     """Multi-turn conversation. Turns of a thread are checkpointed to CHECKPOINT_DB, so a
     later `sentinel chat --thread ID` (even after a restart) continues with its memory."""
@@ -205,13 +211,14 @@ def chat(
     if tools and settings.data_mode == "live":
         typer.echo("DATA_MODE=live connectors arrive in step (i); use --no-tools.", err=True)
         raise typer.Exit(2)
+    auto_approve = _memory_auto_approve(settings, auto_approve_memory)
     today = as_of.replace(tzinfo=UTC) if as_of else None
     thread_id = thread or uuid.uuid4().hex
     provider = build_tracer_provider(settings)
 
     async def session(store: ChunkStore) -> None:
         async with open_checkpointer(settings.checkpoint_db) as saver:
-            deps = _agent_deps(settings, store, provider, k)
+            deps = _agent_deps(settings, store, provider, k, auto_approve)
             deps.checkpointer = saver
             if history:
                 for i, turn in enumerate(await thread_turns(deps, thread_id), start=1):
@@ -242,8 +249,32 @@ def chat(
         provider.shutdown()
 
 
-def _agent_deps(settings: Settings, store: ChunkStore, provider: TracerProvider, k: int) -> Deps:
+AutoApproveMemory = Annotated[
+    bool,
+    typer.Option(
+        "--auto-approve-memory",
+        help="Let the agent write long-term memory without approval (fixture data only).",
+    ),
+]
+
+
+def _memory_auto_approve(settings: Settings, flag: bool) -> bool:
+    auto = settings.memory_auto_approve or flag
+    if auto and settings.data_mode == "live":
+        typer.echo("--auto-approve-memory is refused with DATA_MODE=live.", err=True)
+        raise typer.Exit(2)
+    return auto
+
+
+def _agent_deps(
+    settings: Settings, store: ChunkStore, provider: TracerProvider, k: int, auto_approve: bool
+) -> Deps:
     llm = make_chat_model(settings)
+    try:
+        memory = make_memory_backend(settings)
+    except NotImplementedError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(2) from exc
     return Deps(
         store=store,
         llm=llm,
@@ -252,6 +283,9 @@ def _agent_deps(settings: Settings, store: ChunkStore, provider: TracerProvider,
         k=k,
         max_hops=settings.max_hops,
         tool_timeout_s=settings.tool_timeout_s,
+        memory=memory,
+        data_mode=settings.data_mode,
+        memory_auto_approve=auto_approve,
     )
 
 
@@ -280,6 +314,11 @@ def _print_result(result: AskResult, settings: Settings) -> None:
         typer.echo(f"  {sq.id} [{sq.relation} -> {','.join(sq.target_sources)}] {sq.text}{mark}")
     for failure in result.failures:
         typer.echo(f"  tool failure: {failure.source}.{failure.tool}: {failure.error}")
+    for note in result.memory_notes:
+        state = "stale" if note.stale else ("verified" if note.verified else "unverified")
+        typer.echo(f"  memory note [{state}] {note.key} (source {note.source})")
+    for write in result.memory_writes:
+        typer.echo(f"  memory {write.op} {write.key}: {write.status} ({write.reason})")
     if not result.citation_report.ok:
         typer.echo(f"\ncitation check: {result.citation_report.model_dump_json()}")
     usage = result.token_usage
@@ -289,6 +328,73 @@ def _print_result(result: AskResult, settings: Settings) -> None:
         f"tokens_out={usage.output_tokens} tracing={settings.tracing_backend} "
         f"llm={settings.llm_provider}"
     )
+
+
+memory_app = typer.Typer(
+    no_args_is_help=True,
+    help="Long-term memory. Writes here are made by you, so they need no further approval.",
+)
+app.add_typer(memory_app, name="memory")
+
+
+def _print_items(items: list[MemoryItem]) -> None:
+    if not items:
+        typer.echo("no memory items")
+    for i in items:
+        flags = ",".join(f for f, on in (("verified", i.verified), ("stale", i.stale)) if on)
+        typer.echo(
+            f"{i.key}: {i.value}\n    source={i.source} updated={i.updated_at.date()} "
+            f"confidence={i.confidence:.2f} {flags or 'unverified'}"
+            + (f" stale_reason={i.stale_reason}" if i.stale_reason else "")
+        )
+
+
+def _memory() -> MemoryBackend:
+    try:
+        return make_memory_backend(get_settings())
+    except NotImplementedError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(2) from exc
+
+
+@memory_app.command("list")
+def memory_list(
+    include_stale: Annotated[bool, typer.Option(help="Include stale items.")] = True,
+) -> None:
+    """List remembered facts."""
+    _print_items(_memory().all(include_stale=include_stale))
+
+
+@memory_app.command("search")
+def memory_search(
+    query: str,
+    limit: Annotated[int, typer.Option(min=1, max=50)] = 5,
+    include_stale: Annotated[bool, typer.Option(help="Include stale items.")] = False,
+) -> None:
+    """Search remembered facts (fresh and verified first)."""
+    _print_items(_memory().search(query, limit, include_stale=include_stale))
+
+
+@memory_app.command("put")
+def memory_put(key: str, value: str) -> None:
+    """Remember a fact you state yourself (stored unverified, source=user)."""
+    try:
+        item = MemoryItem(key=key, value=value, source="user", updated_at=datetime.now(UTC))
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc).splitlines()[0]) from exc
+    _print_items([_memory().put(item)])
+
+
+@memory_app.command("mark-stale")
+def memory_mark_stale(
+    key: str, reason: Annotated[str, typer.Option(help="Why it is stale.")] = "marked by user"
+) -> None:
+    """Flag a remembered fact as stale."""
+    item = _memory().mark_stale(key, reason)
+    if item is None:
+        typer.echo(f"no memory item {key!r}", err=True)
+        raise typer.Exit(1)
+    _print_items([item])
 
 
 @infra_app.command("init")

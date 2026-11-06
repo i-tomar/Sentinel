@@ -125,6 +125,46 @@ def test_chat_validates_arguments() -> None:
     assert runner.invoke(app, ["chat", "--history"]).exit_code == 2
 
 
+OWNER_Q = "Who owns the Q3 auth migration plan v2?"
+
+
+def test_ask_memory_writes_need_the_explicit_flag() -> None:
+    pending = runner.invoke(app, ["ask", OWNER_Q])
+    assert pending.exit_code == 0, pending.output
+    assert "memory put owns-q3-auth-migration-plan-v2: pending_approval" in pending.stdout
+    assert "no memory items" in runner.invoke(app, ["memory", "list"]).stdout
+
+    written = runner.invoke(app, ["ask", OWNER_Q, "--auto-approve-memory"])
+    assert written.exit_code == 0, written.output
+    assert "memory put owns-q3-auth-migration-plan-v2: written" in written.stdout
+    listed = runner.invoke(app, ["memory", "list"]).stdout
+    assert "owns-q3-auth-migration-plan-v2:" in listed
+    assert "verified" in listed
+
+    recalled = runner.invoke(app, ["ask", "Who owns the auth migration plan?"])
+    assert "memory note [verified] owns-q3-auth-migration-plan-v2" in recalled.stdout
+
+
+def test_auto_approve_is_refused_on_live_data(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATA_MODE", "live")
+    result = runner.invoke(app, ["ask", OWNER_Q, "--no-tools", "--auto-approve-memory"])
+    assert result.exit_code == 2
+    assert "refused with DATA_MODE=live" in result.output
+
+
+def test_memory_cli_put_search_mark_stale() -> None:
+    put = runner.invoke(app, ["memory", "put", "cutover-date", "Cutover is on 2026-11-20"])
+    assert put.exit_code == 0, put.output
+    assert "source=user" in put.stdout
+    assert "unverified" in put.stdout
+    assert "cutover-date" in runner.invoke(app, ["memory", "search", "when is cutover"]).stdout
+    stale = runner.invoke(app, ["memory", "mark-stale", "cutover-date", "--reason", "moved"])
+    assert "stale_reason=moved" in stale.stdout
+    assert "no memory items" in runner.invoke(app, ["memory", "search", "cutover"]).stdout
+    assert runner.invoke(app, ["memory", "mark-stale", "nope"]).exit_code == 1
+    assert runner.invoke(app, ["memory", "put", "Bad Key", "x"]).exit_code == 2
+
+
 def test_ask_without_evidence_says_so() -> None:
     assert runner.invoke(app, ["ingest", "-s", "notion"]).exit_code == 0
     result = runner.invoke(app, ["ask", "What is the capital of France?"])
