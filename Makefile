@@ -10,8 +10,8 @@ S ?=
 help: ## List targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-12s %s\n", $$1, $$2}'
 
-sync: ## Install pinned deps (incl. dev group) into .venv
-	$(UV) sync --locked
+sync: ## Install pinned deps (dev group + optional LLM provider extras) into .venv
+	$(UV) sync --locked --all-extras
 
 lint: ## ruff lint + format check + mypy
 	$(UV) run ruff check .
