@@ -203,6 +203,43 @@ DATA_MODE=live uv run sentinel ingest        # capped at LIVE_MAX_RECORDS per so
 Each live server process receives only its own source's credentials. Memory auto-approve is
 refused in live mode. No live call has been run by the project yet.
 
+## Guards: prompt injection and PII (step j)
+
+`sentinel.guards.injection` scores text from users (`origin="user"`) or retrieved records
+(`origin="retrieved"`) and returns a 0..1 score, `flagged` (at `INJECTION_THRESHOLD`, default
+0.5), and every matching span, ready for step (k) to wrap or strip.
+
+- **Heuristic rules** (weighted, with spans) catch:
+  - instruction overrides, fresh-start / "new instructions", fake `SYSTEM:` lines and chat
+    template tokens, persona switches;
+  - tool coercion and tool-call JSON, secrecy and false-authority claims, exfiltration to email
+    addresses, prompt-leak requests, delimiter escapes;
+  - instructions in HTML comments or markdown link text;
+  - Hindi, Hinglish, Spanish, French and German overrides.
+- **Context-sensitive weighting:**
+  - Rules that address "the AI" only count in retrieved data, since users may address the
+    assistant.
+  - Quoted mentions count a quarter, so security training text isn't flagged.
+  - Base64 blobs are decoded and re-scanned.
+- **Optional layers:** any `score(text)` classifier is combined in, and an `LLMJudge` is asked
+  only for borderline scores. It can confirm or clear; unusable output changes nothing.
+
+`sentinel.guards.pii` redacts with Presidio (credit cards with Luhn, IBAN, IPs, international
+phones, US SSNs, crypto addresses) plus custom recognizers for emails, Indian phones, PAN and
+Aadhaar-like numbers. It runs fully offline:
+
+- Presidio uses a blank spaCy pipeline, so there is **no name/location NER**.
+- Its email and URL recognizers are not loaded, because they fetch the public-suffix list.
+- URLs are kept on purpose.
+- Recognizers that misfire on ids and dates are not enabled.
+
+Tests were written first:
+
+- **Retrieved content.** Every one of the 12 poisoned fixture records is flagged on its
+  payload; none of the other 168 records (incl. 7 benign lookalikes) is.
+- **User input.** 17 adversarial prompts are flagged; 16 benign lookalikes are not.
+- **PII.** All seeded PII is redacted while ticket ids, dates, amounts, UUIDs and URLs stay intact.
+
 ## Asking questions
 
 ```bash
