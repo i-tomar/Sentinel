@@ -12,7 +12,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from sentinel.retrieval.models import Chunk, Source, doc_key
+from sentinel.retrieval.models import Chunk, Document, Source, doc_key
 
 SNIPPET_CHARS = 280
 _MARKER = re.compile(r"\[(\d{1,3})\]")
@@ -72,20 +72,48 @@ class CitationResolver:
         self._by_n: dict[int, Citation] = {}
 
     def add(self, chunk: Chunk) -> Citation:
-        existing = self._by_key.get(chunk.doc_key)
+        """Register a retrieved index chunk (numbered per document)."""
+        return self._register(
+            chunk.source,
+            chunk.doc_id,
+            chunk.title,
+            chunk.url,
+            chunk.text,
+            chunk.updated_at,
+            chunk.fetched_at,
+        )
+
+    def add_document(self, doc: Document) -> Citation:
+        """Register a record returned directly by an MCP tool call."""
+        return self._register(
+            doc.source, doc.id, doc.title, doc.url, doc.text, doc.updated_at, doc.fetched_at
+        )
+
+    def _register(
+        self,
+        source: Source,
+        doc_id: str,
+        title: str,
+        url: str,
+        text: str,
+        updated_at: datetime,
+        fetched_at: datetime,
+    ) -> Citation:
+        key = doc_key(source, doc_id)
+        existing = self._by_key.get(key)
         if existing is not None:
             return existing
         citation = Citation(
             n=len(self._by_n) + 1,
-            source=chunk.source,
-            doc_id=chunk.doc_id,
-            title=chunk.title,
-            url=chunk.url,
-            snippet=_snippet(chunk.text),
-            updated_at=chunk.updated_at,
-            fetched_at=chunk.fetched_at,
+            source=source,
+            doc_id=doc_id,
+            title=title,
+            url=url,
+            snippet=_snippet(text),
+            updated_at=updated_at,
+            fetched_at=fetched_at,
         )
-        self._by_key[chunk.doc_key] = citation
+        self._by_key[key] = citation
         self._by_n[citation.n] = citation
         return citation
 
