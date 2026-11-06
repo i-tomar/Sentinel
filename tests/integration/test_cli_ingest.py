@@ -10,6 +10,7 @@ import pytest
 from typer.testing import CliRunner
 
 from sentinel.cli import app
+from sentinel.config import get_settings
 
 pytestmark = pytest.mark.integration
 
@@ -126,6 +127,24 @@ def test_chat_validates_arguments() -> None:
 
 
 OWNER_Q = "Who owns the Q3 auth migration plan v2?"
+
+
+def test_ask_reports_neutralized_instructions(monkeypatch: pytest.MonkeyPatch) -> None:
+    question = "Which tickets are blocked by the customer escalation process?"
+    removed = runner.invoke(app, ["ask", question, "--as-of", "2026-11-02"])
+    assert removed.exit_code == 0, removed.output
+    assert "guard: removed 1 suspected instruction(s) from notion:customer-escalation-process" in (
+        removed.stdout
+    )
+    assert "pre-authorized" not in removed.stdout
+
+    monkeypatch.setenv("RETRIEVED_GUARD_MODE", "quote")
+    get_settings.cache_clear()
+    quoted = runner.invoke(app, ["ask", question, "--as-of", "2026-11-02"])
+    assert quoted.exit_code == 0, quoted.output
+    assert "guard: quoted 1 suspected instruction(s) from notion:customer-escalation-process" in (
+        quoted.stdout
+    )
 
 
 def test_ask_memory_writes_need_the_explicit_flag() -> None:
