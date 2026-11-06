@@ -13,6 +13,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from datetime import date, datetime, timedelta
 
 from sentinel.graph.state import SubQuestion, TimeWindow, ToolCall
+from sentinel.guards.sanitize import mask_neutralized
 from sentinel.mcp_clients.tools import READ_TOOLS, SOURCE_TOOLS
 from sentinel.memory.models import MemoryItem
 from sentinel.retrieval.models import Document, Source
@@ -36,12 +37,13 @@ def window_dates(window: TimeWindow, as_of: datetime) -> tuple[date, date]:
 
 
 def ticket_keys(docs: Iterable[Document]) -> list[str]:
-    """Ticket keys in order of appearance: a Jira record's own key first, then mentions."""
+    """Ticket keys in order of appearance: a Jira record's own key first, then mentions.
+    Text the retrieved-content guard quoted as untrusted is never a source of tool arguments."""
     keys: list[str] = []
     for doc in docs:
         if doc.source == "jira":
             keys.append(doc.id)
-        keys.extend(_TICKET_KEY.findall(f"{doc.title}\n{doc.text}"))
+        keys.extend(_TICKET_KEY.findall(mask_neutralized(f"{doc.title}\n{doc.text}")))
     return list(dict.fromkeys(keys))
 
 
