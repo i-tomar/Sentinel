@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import re
+import sys
+import uuid
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from datetime import UTC, datetime
@@ -16,7 +19,8 @@ from opentelemetry.sdk.trace import TracerProvider
 from sentinel import __version__, infra
 from sentinel.citations import CitationResolver
 from sentinel.config import Settings, get_settings
-from sentinel.graph.build import AskResult, Deps, ask_async
+from sentinel.graph.build import AskResult, Deps, ask_async, thread_turns
+from sentinel.graph.checkpoint import open_checkpointer
 from sentinel.graph.nodes.execute_tools import MCPToolExecutor
 from sentinel.graph.nodes.planner import make_planner
 from sentinel.llm import make_chat_model
@@ -163,6 +167,79 @@ def ask_command(
         typer.echo(result.model_dump_json(indent=2))
         return
     _print_result(result, settings)
+
+
+_THREAD_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+@app.command()
+def chat(
+    question: Annotated[
+        str | None, typer.Argument(help="Ask one question and exit; omit for a session.")
+    ] = None,
+    thread: Annotated[
+        str | None,
+        typer.Option("--thread", "-t", help="Thread id to continue (new one if omitted)."),
+    ] = None,
+    history: Annotated[bool, typer.Option(help="Show the thread's remembered turns.")] = False,
+    source: SourceOption = None,
+    k: Annotated[int, typer.Option("-k", min=1, max=20, help="Chunks to retrieve.")] = 6,
+    tools: Annotated[
+        bool, typer.Option(help="Call source MCP tools live (fixture servers by default).")
+    ] = True,
+    as_of: Annotated[
+        datetime | None,
+        typer.Option(formats=["%Y-%m-%d"], help="Date treated as today, e.g. for 'last week'."),
+    ] = None,
+) -> None:
+    """Multi-turn conversation. Turns of a thread are checkpointed to CHECKPOINT_DB, so a
+    later `sentinel chat --thread ID` (even after a restart) continues with its memory."""
+    settings = get_settings()
+    sources = _sources(source)
+    if thread is not None and not _THREAD_ID.match(thread):
+        raise typer.BadParameter(
+            "thread id: 1-64 letters, digits, '-' or '_'", param_hint="--thread"
+        )
+    if history and thread is None:
+        raise typer.BadParameter("--history needs --thread", param_hint="--history")
+    if tools and settings.data_mode == "live":
+        typer.echo("DATA_MODE=live connectors arrive in step (i); use --no-tools.", err=True)
+        raise typer.Exit(2)
+    today = as_of.replace(tzinfo=UTC) if as_of else None
+    thread_id = thread or uuid.uuid4().hex
+    provider = build_tracer_provider(settings)
+
+    async def session(store: ChunkStore) -> None:
+        async with open_checkpointer(settings.checkpoint_db) as saver:
+            deps = _agent_deps(settings, store, provider, k)
+            deps.checkpointer = saver
+            if history:
+                for i, turn in enumerate(await thread_turns(deps, thread_id), start=1):
+                    typer.echo(f"[{i}] Q: {turn.question}\n    A: {turn.answer}")
+                return
+            typer.echo(f"thread_id={thread_id}")
+            async with _tool_access(settings, sources, deps, tools):
+                if question is not None:
+                    _print_turn(await ask_async(question, deps, sources, today, thread_id))
+                    return
+                while True:
+                    line = await anyio.to_thread.run_sync(sys.stdin.readline)
+                    text = line.strip()
+                    if not line or text.lower() in {"exit", "quit"}:
+                        return
+                    if text:
+                        _print_turn(await ask_async(text, deps, sources, today, thread_id))
+
+    def _print_turn(result: AskResult) -> None:
+        _print_result(result, settings)
+        typer.echo(f"thread_id={result.thread_id} turn={result.turn}\n")
+
+    try:
+        with _open_store() as store:
+            store.ensure_collection()
+            anyio.run(session, store)
+    finally:
+        provider.shutdown()
 
 
 def _agent_deps(settings: Settings, store: ChunkStore, provider: TracerProvider, k: int) -> Deps:
