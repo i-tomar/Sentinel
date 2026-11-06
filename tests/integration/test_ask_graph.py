@@ -15,9 +15,8 @@ from qdrant_client import QdrantClient
 
 from sentinel.config import Settings
 from sentinel.graph.build import AskResult, Deps, ask
-from sentinel.graph.nodes.answerer import build_messages
-from sentinel.graph.nodes.retrieve import build_evidence
-from sentinel.llm import INSUFFICIENT_PREFIX, MockLLM, make_chat_model, prompt_hash
+from sentinel.graph.nodes.retrieve import relevant_chunks
+from sentinel.llm import INSUFFICIENT_PREFIX, MockLLM, make_chat_model
 from sentinel.retrieval.embed import HashEmbedder
 from sentinel.retrieval.ingest import ingest
 from sentinel.retrieval.models import SOURCES, Source
@@ -69,6 +68,13 @@ def _deps(store: ChunkStore, exporter: InMemorySpanExporter, llm: object = None)
     return Deps(store=store, llm=llm or MockLLM(), tracer=tracer)  # type: ignore[arg-type]
 
 
+def _scripted(store: ChunkStore, exporter: InMemorySpanExporter, q: str, reply: str) -> MockLLM:
+    """Dry-run once to capture the exact answer prompt, then script the reply for it."""
+    dry = MockLLM()
+    ask(q, _deps(store, exporter, dry))
+    return MockLLM(scripted={dry.calls[-1]: reply})
+
+
 def _assert_citations_resolve(result: AskResult) -> None:
     for citation in result.citations:
         assert citation.key in result.evidence_keys
@@ -94,9 +100,8 @@ def test_cited_answer_from_retrieved_evidence(
 def test_unknown_citation_numbers_never_reach_the_answer(
     store: ChunkStore, exporter: InMemorySpanExporter
 ) -> None:
-    evidence = build_evidence(OWNER_Q, store.search(OWNER_Q, 6, sources=list(SOURCES)))
     script = "Priya Sharma owns the auth migration plan [1]. It was approved by the board [42]."
-    llm = MockLLM(scripted={prompt_hash(build_messages(OWNER_Q, evidence)): script})
+    llm = _scripted(store, exporter, OWNER_Q, script)
     result = ask(OWNER_Q, _deps(store, exporter, llm))
     assert llm.calls  # the scripted reply was actually used
     assert result.citation_report.unknown == [42]
@@ -124,10 +129,9 @@ def test_llm_saying_insufficient_is_respected(
     store: ChunkStore, exporter: InMemorySpanExporter
 ) -> None:
     q = "When will PROJ-142 be released to customers?"
-    evidence = build_evidence(q, store.search(q, 6, sources=list(SOURCES)))
-    assert evidence  # there is related evidence, but it does not contain a release date
+    assert relevant_chunks(q, store.search(q, 6, sources=list(SOURCES)))  # related, no date
     script = f"{INSUFFICIENT_PREFIX}: the sources do not give a release date for PROJ-142."
-    llm = MockLLM(scripted={prompt_hash(build_messages(q, evidence)): script})
+    llm = _scripted(store, exporter, q, script)
     result = ask(q, _deps(store, exporter, llm))
     assert result.insufficient_evidence
     assert result.citations == []
@@ -168,8 +172,8 @@ def test_traces_contain_no_seeded_pii_or_secrets(
     store: ChunkStore, exporter: InMemorySpanExporter, question: str
 ) -> None:
     result = ask(question, _deps(store, exporter))
-    evidence = build_evidence(question, store.search(question, 6, sources=list(SOURCES)))
-    raw_inputs = "\n".join(ev.text for ev in evidence) + result.answer
+    chunks = relevant_chunks(question, store.search(question, 6, sources=list(SOURCES)))
+    raw_inputs = "\n".join(c.text for c in chunks) + result.answer
     assert any(seed.value in raw_inputs for seed in PII_SEEDS), "precondition: PII was in play"
 
     dumped = "\n".join(s.to_json() for s in exporter.get_finished_spans())
@@ -215,9 +219,13 @@ def test_real_openai_path_with_mocked_http(
         reply = "Priya Sharma owns the Q3 auth migration plan v2 [1][9]."
         return httpx2.Response(200, json=_completion(reply))
 
+    transport = httpx2.MockTransport(handler)
     llm = make_chat_model(
         _settings(llm_provider="openai", llm_model="test-model", llm_api_key=SECRETS[0]),
-        client_options={"http_client": httpx2.Client(transport=httpx2.MockTransport(handler))},
+        client_options={  # the graph calls ainvoke, which uses the async client
+            "http_client": httpx2.Client(transport=transport),
+            "http_async_client": httpx2.AsyncClient(transport=transport),
+        },
     )
     result = ask(OWNER_Q, _deps(store, exporter, llm))
 

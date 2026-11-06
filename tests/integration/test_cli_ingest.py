@@ -63,6 +63,27 @@ def test_ask_prints_cited_answer_sources_and_trace_id() -> None:
     assert re.fullmatch(r"[0-9a-f]{32}", payload["trace_id"])
 
 
+def test_ask_three_hop_with_live_fixture_tools() -> None:
+    """No ingest: evidence comes from stdio fixture MCP servers over three hops."""
+    result = runner.invoke(
+        app,
+        [
+            "ask",
+            "Which tickets are blocked by the auth migration and who emailed about them?",
+            "--as-of",
+            "2026-11-02",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    out = result.stdout
+    assert "hops=3 " in out
+    assert "sq2 [blocked_by -> jira]" in out
+    assert "sq3 [mentions -> gmail]" in out
+    assert "(unanswered)" not in out
+    assert "Sources:" in out
+    assert re.search(r"trace_id=[0-9a-f]{32} ", out)
+
+
 def test_ask_without_evidence_says_so() -> None:
     assert runner.invoke(app, ["ingest", "-s", "notion"]).exit_code == 0
     result = runner.invoke(app, ["ask", "What is the capital of France?"])
