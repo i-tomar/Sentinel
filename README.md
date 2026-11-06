@@ -115,6 +115,36 @@ uv run sentinel ask "..." --no-tools      # index only, no live MCP calls
 - **Writes.** No write or destructive tool is reachable yet. That arrives with the permission
   gate in Phase 3.
 
+## Conversations and short-term memory (step g)
+
+```bash
+uv run sentinel chat "Which tickets are blocked by the auth migration?" --thread demo --as-of 2026-11-02
+uv run sentinel chat "Who emailed about them?" --thread demo      # continues the same thread
+uv run sentinel chat "Who is assigned the second ticket?" -t demo
+uv run sentinel chat --history -t demo                            # remembered turns
+uv run sentinel chat                                              # interactive; prints a new thread_id
+make chat T=demo
+```
+
+- **Checkpoints.** Each turn is checkpointed per `thread_id` with LangGraph's SQLite
+  checkpointer at `CHECKPOINT_DB` (default `./.data/checkpoints.sqlite`). Memory therefore
+  survives restarts, and threads never see each other's state. `sentinel ask` stays stateless.
+- **What a thread remembers.** The last 8 turns (question, answer, plan, unanswered
+  sub-questions, the records each sub-question found, citations) and only the records those
+  turns reference.
+- **Follow-ups build on memory instead of starting over:**
+  - "who emailed about them?" searches emails for the tickets the previous answer was about.
+  - "blocked by those" works the same way for blocked tickets.
+  - "the second ticket" answers from the remembered record with no tool calls.
+  - "continue" re-runs the previous turn's unresolved sub-questions, seeded with records
+    already fetched.
+  - A question with no reference words is planned from scratch.
+- **Planners never see remembered record text.** They see the user's earlier questions,
+  opaque record ids, and unresolved sub-questions, so memory doesn't reopen the injection path.
+  LLM-proposed record ids are dropped unless the thread actually fetched them.
+- **Checkpoint deserialization is allowlisted.** It only revives Sentinel's own state models.
+  A test fails if a new model reachable from the state is not on the list.
+
 ## Asking questions
 
 ```bash
