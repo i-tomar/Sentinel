@@ -2,9 +2,12 @@
 
 Lifecycle: pending -> approved | denied | expired; approved -> consumed | expired. Only an
 approved, unexpired record whose session, user and argument fingerprint all match can be
-consumed, and only once (an atomic UPDATE guards it even across processes). Arguments are kept
-only while the record is open, because the approved action has to be replayed exactly; they are
-cleared when it is consumed, denied or expires.
+consumed, and only once: a conditional UPDATE (`... WHERE status = 'approved'`) decides the
+winner even between processes, and consumption happens before the write is dispatched, so a
+write runs at most once per approval. Arguments are kept only while the record is open, because
+the approved action has to be replayed exactly. They are cleared when it is consumed or denied,
+and overdue requests are expired (arguments cleared) every time a store is opened or a new
+request is made, whether or not anyone looks at them again. There is no background timer.
 """
 
 from __future__ import annotations
@@ -93,7 +96,12 @@ class ApprovalStore:
     ) -> None:
         if str(path) != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(path), check_same_thread=False, isolation_level=None)
+        self._conn = sqlite3.connect(
+            str(path), check_same_thread=False, isolation_level=None, timeout=10.0
+        )
+        # SQLite overwrites deleted/cleared content with zeros instead of leaving it in free
+        # pages. This is hygiene, not secure erasure (see the README's retention notes).
+        self._conn.execute("PRAGMA secure_delete = ON")
         self._conn.execute(_SCHEMA)
         self._lock = threading.Lock()
         self.ttl = timedelta(seconds=ttl_s)
