@@ -84,6 +84,9 @@ class Settings(BaseSettings):
     retrieved_guard_mode: Literal["remove", "quote"] = "remove"
     """How flagged spans in retrieved records are neutralized before planning and answering."""
     audit_log: Path = Path("./.data/audit.jsonl")
+    approval_db: Path = Path("./.data/approvals.sqlite")
+    approval_ttl_s: int = Field(default=900, ge=30, le=86_400)
+    """How long a proposed write can wait for approval, and an approval for execution."""
 
     @field_validator("allowed_email_domains", mode="before")
     @classmethod

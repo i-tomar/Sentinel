@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import getpass
 import json
 import re
 import sys
@@ -37,6 +38,17 @@ from sentinel.mcp_clients.pool import active_sources, open_clients
 from sentinel.memory.backend import MemoryBackend
 from sentinel.memory.models import MemoryItem
 from sentinel.memory.policy import make_memory_backend
+from sentinel.permissions.actions import Action
+from sentinel.permissions.approvals import Approval, ApprovalError, ApprovalStore
+from sentinel.permissions.audit import AuditLog
+from sentinel.permissions.gate import (
+    ActionOutcome,
+    ActionRunner,
+    approve_action,
+    deny_action,
+    request_action,
+)
+from sentinel.permissions.policy import Policy
 from sentinel.retrieval.embed import make_embedder
 from sentinel.retrieval.ingest import SourceReport
 from sentinel.retrieval.ingest import ingest as ingest_sources
@@ -295,7 +307,27 @@ def _agent_deps(
         injection_detector=InjectionDetector(threshold=settings.injection_threshold),
         guard_mode=settings.retrieved_guard_mode,
         input_detector=InjectionDetector(threshold=settings.injection_threshold),
+        policy=_policy(settings),
+        approvals=_approvals(settings),
+        audit=AuditLog(settings.audit_log),
+        principal=_principal(),
     )
+
+
+def _policy(settings: Settings) -> Policy:
+    return Policy(allowed_email_domains=settings.allowed_email_domains)
+
+
+def _approvals(settings: Settings) -> ApprovalStore:
+    return ApprovalStore(settings.approval_db, ttl_s=settings.approval_ttl_s)
+
+
+def _principal() -> str:
+    """The local OS user: approvals are bound to whoever asked (single-user CLI, no auth)."""
+    try:
+        return getpass.getuser() or "local-user"
+    except (KeyError, OSError):
+        return "local-user"
 
 
 @asynccontextmanager
@@ -335,7 +367,22 @@ def _print_result(result: AskResult, settings: Settings) -> None:
         state = "stale" if note.stale else ("verified" if note.verified else "unverified")
         typer.echo(f"  memory note [{state}] {note.key} (source {note.source})")
     for write in result.memory_writes:
-        typer.echo(f"  memory {write.op} {write.key}: {write.status} ({write.reason})")
+        pending = f" approval={write.approval_id}" if write.status == "pending_approval" else ""
+        typer.echo(f"  memory {write.op} {write.key}: {write.status} ({write.reason}){pending}")
+    for action in result.actions:
+        what = f"{action.source}.{action.tool} {_fields(action.summary)}"
+        if action.status == "policy_denied":
+            typer.echo(f"\naction refused by policy: {what} ({action.reason})")
+            continue
+        typer.echo(f"\napproval required ({action.risk}): {what}\n  id={action.approval_id}")
+        confirm = f' --confirm "{action.confirmation}"' if action.confirmation else ""
+        typer.echo(
+            f"  approve: sentinel approve {action.approval_id} --session {result.session_id}"
+            f"{confirm}\n  deny:    sentinel deny {action.approval_id} --session "
+            f"{result.session_id}"
+        )
+    if any(w.status == "pending_approval" for w in result.memory_writes):
+        typer.echo(f"  (memory approvals: sentinel approve <id> --session {result.session_id})")
     if not result.citation_report.ok:
         typer.echo(f"\ncitation check: {result.citation_report.model_dump_json()}")
     usage = result.token_usage
@@ -345,6 +392,112 @@ def _print_result(result: AskResult, settings: Settings) -> None:
         f"tokens_out={usage.output_tokens} tracing={settings.tracing_backend} "
         f"llm={settings.llm_provider}"
     )
+
+
+def _fields(summary: dict[str, object]) -> str:
+    return " ".join(f"{k}={v}" for k, v in summary.items() if v not in (None, False, 0, ""))
+
+
+SessionOption = Annotated[
+    str, typer.Option("--session", help="Session the approval was requested in (printed by ask).")
+]
+
+
+@app.command()
+def approve(
+    approval_id: str,
+    session: SessionOption,
+    confirm: Annotated[
+        str | None,
+        typer.Option("--confirm", help="Typed confirmation, required for destructive actions."),
+    ] = None,
+) -> None:
+    """Approve one proposed write and run it once (fixture data; live writes are refused)."""
+    settings = get_settings()
+    store, audit, principal = _approvals(settings), AuditLog(settings.audit_log), _principal()
+    try:
+        approval = approve_action(
+            approval_id,
+            store=store,
+            audit=audit,
+            session=session,
+            principal=principal,
+            confirmation=confirm,
+        )
+    except ApprovalError as exc:
+        typer.echo(f"refused: {exc.reason}", err=True)
+        raise typer.Exit(1) from exc
+    outcome = anyio.run(_run_approved, settings, store, audit, approval, session, principal)
+    if outcome.status == "succeeded":
+        typer.echo(f"done: {approval.source}.{approval.tool} {_fields(outcome.result or {})}")
+        return
+    typer.echo(f"{outcome.status}: {approval.source}.{approval.tool} ({outcome.reason})", err=True)
+    raise typer.Exit(1)
+
+
+async def _run_approved(
+    settings: Settings,
+    store: ApprovalStore,
+    audit: AuditLog,
+    approval: Approval,
+    session: str,
+    principal: str,
+) -> ActionOutcome:
+    policy = _policy(settings)
+    runner = ActionRunner(
+        store=store,
+        audit=audit,
+        policy=policy,
+        data_mode=settings.data_mode,
+        timeout_s=settings.tool_timeout_s,
+    )
+    action = approval.action()
+    if approval.source == "memory":
+        runner.memory = make_memory_backend(settings)
+    elif (
+        action is not None
+        and approval.source in SOURCES
+        and policy.evaluate(action, settings.data_mode).verdict == "require_approval"
+    ):
+        source: Source = next(s for s in SOURCES if s == approval.source)
+        async with open_clients(settings, [source]) as clients:
+            runner.clients = {str(k): v for k, v in clients.items()}
+            return await runner.execute(approval.id, session=session, principal=principal)
+    return await runner.execute(approval.id, session=session, principal=principal)
+
+
+@app.command()
+def deny(approval_id: str, session: SessionOption) -> None:
+    """Deny one proposed write; it can never run afterwards."""
+    settings = get_settings()
+    try:
+        approval = deny_action(
+            approval_id,
+            store=_approvals(settings),
+            audit=AuditLog(settings.audit_log),
+            session=session,
+            principal=_principal(),
+        )
+    except ApprovalError as exc:
+        typer.echo(f"refused: {exc.reason}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"denied: {approval.source}.{approval.tool} ({approval.id})")
+
+
+@app.command()
+def approvals(
+    session: Annotated[str | None, typer.Option("--session", help="Only this session.")] = None,
+) -> None:
+    """List approval requests (ids, status, tool and expiry; arguments are not shown)."""
+    records = _approvals(get_settings()).list(session)
+    if not records:
+        typer.echo("no approval requests")
+        return
+    for a in records:
+        typer.echo(
+            f"{a.id} {a.status:<8} {a.risk:<11} {a.source}.{a.tool} session={a.session} "
+            f"expires={a.expires_at.isoformat(timespec='seconds')}"
+        )
 
 
 def _require_live_ready(settings: Settings, sources: list[Source]) -> list[Source]:
@@ -509,7 +662,10 @@ def memory_put(key: str, value: str) -> None:
         item = MemoryItem(key=key, value=value, source="user", updated_at=datetime.now(UTC))
     except ValueError as exc:
         raise typer.BadParameter(str(exc).splitlines()[0]) from exc
-    _print_items([_memory().put(item)])
+    memory = _memory()
+    action = Action(source="memory", tool="put_memory", args=item.model_dump(mode="json"))
+    _run_user_command(action, memory)
+    _print_items([m for m in [memory.get(key)] if m is not None])
 
 
 @memory_app.command("mark-stale")
@@ -517,11 +673,66 @@ def memory_mark_stale(
     key: str, reason: Annotated[str, typer.Option(help="Why it is stale.")] = "marked by user"
 ) -> None:
     """Flag a remembered fact as stale."""
-    item = _memory().mark_stale(key, reason)
-    if item is None:
+    memory = _memory()
+    action = Action(
+        source="memory",
+        tool="mark_stale",
+        args={"key": key, "reason": reason, "superseded_by": None},
+    )
+    outcome = _run_user_command(action, memory)
+    item = memory.get(key)
+    if item is None or not (outcome.result or {}).get("found"):
         typer.echo(f"no memory item {key!r}", err=True)
         raise typer.Exit(1)
     _print_items([item])
+
+
+def _run_user_command(action: Action, memory: MemoryBackend) -> ActionOutcome:
+    """A write the user typed as a command is approved by that command, for exactly these
+    arguments, and still goes through the policy, the approval store and the audit log."""
+    settings = get_settings()
+    store, audit, principal = _approvals(settings), AuditLog(settings.audit_log), _principal()
+    session = f"cli-{uuid.uuid4().hex}"
+    record = request_action(
+        action,
+        policy=_policy(settings),
+        data_mode=settings.data_mode,
+        store=store,
+        audit=audit,
+        session=session,
+        principal=principal,
+    )
+    if record.approval_id is None:
+        typer.echo(f"refused by policy: {record.reason}", err=True)
+        raise typer.Exit(1)
+    approve_action(
+        record.approval_id,
+        store=store,
+        audit=audit,
+        session=session,
+        principal=principal,
+        via="cli_command",
+        reason="typed by the user as a CLI command",
+    )
+    runner = ActionRunner(
+        store=store,
+        audit=audit,
+        policy=_policy(settings),
+        data_mode=settings.data_mode,
+        memory=memory,
+    )
+
+    async def run() -> ActionOutcome:
+        return await runner.execute(record.approval_id or "", session=session, principal=principal)
+
+    outcome = anyio.run(run)
+    if outcome.status == "blocked":
+        typer.echo(f"blocked: {outcome.reason}", err=True)
+        raise typer.Exit(1)
+    if outcome.status == "failed":
+        typer.echo(f"failed: {outcome.reason}", err=True)
+        raise typer.Exit(1)
+    return outcome
 
 
 @infra_app.command("init")
