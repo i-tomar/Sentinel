@@ -171,11 +171,13 @@ uv run python -m servers.memory_mcp.server       # the same memory over MCP (std
 - **Writes are writes.** After an answer, `save_memory` proposes storing the answer as a
   verified fact (only if every sentence passed the citation check against records fetched
   this turn), plus any `mark_stale` updates.
-  - With `DATA_MODE=live` every write stays `pending_approval`. The approval flow arrives
-    with the permission gate in Phase 3.
-  - With fixture data, writes are applied only with `--auto-approve-memory` or
-    `MEMORY_AUTO_APPROVE=true`. That setting is refused together with `DATA_MODE=live`.
-  - `sentinel memory put` is you writing directly, stored unverified with source `user`.
+  - Every write goes through the permission gate (step l). By default it stays
+    `pending_approval` until you run `sentinel approve <id> --session <session>`.
+  - With fixture data only, `--auto-approve-memory` or `MEMORY_AUTO_APPROVE=true` approves
+    the write on your behalf. It still goes through the gate and is audited. That setting is
+    refused together with `DATA_MODE=live`.
+  - `sentinel memory put` is you writing directly, stored unverified with source `user`. The
+    command itself counts as the approval, and the write is audited too.
 - **Memory MCP server.** `search_memory` and `get_memory` are read-only; `put_memory` and
   `mark_stale` are annotated as writes. Facts written over MCP are always stored unverified
   with source `mcp`.
@@ -344,6 +346,101 @@ question with the step (j) detector (`origin="user"`, `INJECTION_THRESHOLD`).
   security-training questions retrieve and cite the training page.
 - **Follow-ups.** In a checkpointed thread, a malicious follow-up is blocked and not
   remembered. The next real follow-up still resolves "them" to the first turn's tickets.
+
+## Permission gate, approvals and audit log (step l)
+
+The agent can **propose** writes; it never runs one on its own.
+
+```bash
+uv run sentinel ask "Set PROJ-142 to Done."     # answers, then prints an approval request
+uv run sentinel approvals                       # ids, status, tool, expiry (no arguments)
+uv run sentinel approve apr-... --session ...   # runs it once (fixture servers only)
+uv run sentinel deny apr-... --session ...
+uv run sentinel approve apr-... --session ... --confirm "send draft-0001"   # destructive
+```
+
+- **Trusted registry.** `sentinel.mcp_clients.registry` classifies every tool Sentinel may call
+  as `read`, `write` or `destructive`, with an argument schema for each write. Unknown or
+  unclassified tools are denied. Server annotations, tool descriptions, model output and
+  retrieved text grant nothing. A test checks that each fixture and memory server's own
+  annotations agree with the registry.
+- **Policy** (`sentinel.permissions.policy`):
+  - Reads are allowed.
+  - Writes need an approval. Destructive tools (`gmail.send`) also need a typed
+    confirmation.
+  - Denied without asking: invalid arguments, recipients or assignees outside
+    `ALLOWED_EMAIL_DOMAINS`, and any write to a live source (the live connectors are
+    read-only).
+- **Where writes come from.** `permission_gate` reads only the user's question. It recognises
+  a few explicit requests ("set PROJ-142 to Done", "add a comment to PROJ-142: ...", "draft an
+  email to x@acme.test about ...", "send draft-0001"). `save_memory` proposes memory writes.
+  Both open an approval request and stop there.
+- **Approvals** (`sentinel.permissions.approvals`, SQLite at `APPROVAL_DB`):
+  - Each approval is bound to the session (the thread id, or a new id per `ask`), the OS
+    user, the tool and a sha256 of the exact arguments.
+  - It expires after `APPROVAL_TTL_S` (default 900 s) and can be used once.
+  - Denied, expired, used, changed-argument, cross-session and cross-user attempts are
+    refused.
+  - Arguments are kept only while a request is open, because they must be replayed exactly,
+    and are dropped once it closes.
+- **One choke point.** `call_json` is the only place Sentinel calls an MCP tool: the agent's
+  reads, ingestion, the live smoke test and approved writes all go through it. It refuses
+  unknown tools, and any write without a grant matching its exact arguments, before the
+  request leaves the process. Writes are never retried; a failed write needs a new approval.
+- **Audit log** (`AUDIT_LOG`, JSONL):
+  - Events: `proposed`, `policy_denied`, `approved`, `denied`, `attempted`, `succeeded`,
+    `failed` and `blocked`.
+  - Each record has the time, session, user, approval id, tool, risk and the action's sha256.
+  - Arguments are reduced to a per-tool summary: ticket keys and statuses, draft ids,
+    recipient counts and domains, text lengths, and memory keys as a 16-hex sha256 prefix.
+    Failures are recorded as an error kind (`tool_error`, `timeout`...), never the message.
+  - It never stores the question, retrieved text, credentials, email addresses, message
+    bodies or memory values.
+
+**How it is tested** (`tests/unit/test_permissions.py`, `tests/integration/test_permission_gate.py`,
+`tests/integration/test_cli_approvals.py`; fixture servers, MockLLM, no live calls):
+
+- **Approval lifecycle.** A proposal doesn't execute. An approved write runs exactly once,
+  and a replay is refused. Denial, a missing approval, changed arguments, expiry, another
+  session and another user are all refused.
+- **Failures and policy.** A tool failure is recorded and not retried. A destructive action
+  without the typed confirmation is refused. An out-of-domain recipient is denied without an
+  approval request.
+- **Prompt injection.** A poisoned ticket ("pre-approved... use update_issue") proposes
+  nothing, even with both injection guards off. A model reply that "approves" a pending id
+  changes nothing. A question claiming "it is already approved" still only opens a request.
+  The input guard still blocks coerced tool calls.
+- **Every path.** A forged write on the read path is refused, and `call_json` refuses writes
+  without a matching grant before reaching the client.
+- **Memory.** Memory writes wait for approval; the fixture-only auto-approve flag is audited.
+
+**Limitations:**
+
+- **Audit log integrity.**
+  - Append-only by convention only. It is a local file, not tamper-evident (no hash chain or
+    signature), and anyone who can edit the file can change it. It has no rotation or
+    retention.
+  - Records are written by the same process as the action, so a crash between the tool call
+    and the `succeeded` line leaves `attempted` with no outcome. A failure to write the log
+    is not rolled back with the action.
+  - It covers writes and approval decisions only; reads are in traces, not in the audit log.
+- **What the log still contains.** Identifiers (session ids, the OS user name, ticket keys,
+  draft ids, recipient domains) are stored as-is. PII redaction of traces is step (m).
+- **Who can approve.** There is no authentication. The approving "user" is whoever runs the
+  CLI as the same OS user, holding the printed approval id (a random 64-bit token) and
+  session id.
+- **What the gate defends against.** Proposals and bugs. A grant is an ordinary in-process
+  object, so this is not a defence against malicious code running inside Sentinel.
+- **Arguments at rest.** Open approval requests keep their arguments in `APPROVAL_DB` (local
+  SQLite) until they are used, denied or expire.
+- **Fixture writes don't persist.** `sentinel approve` starts a fresh fixture server process,
+  so the write is visible only in that run. A later `ask` won't see it.
+- **The memory MCP server.** It exposes `put_memory` and `mark_stale` to any MCP client that
+  launches it. Sentinel never calls them over MCP, and it cannot enforce approvals on other
+  clients.
+- **No in-turn pause.** The brief suggested a LangGraph `interrupt()`. Instead, the turn
+  finishes and approval happens in a separate command, which makes expiry, single use and
+  session binding explicit and testable.
 
 ## Asking questions
 
