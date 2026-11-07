@@ -7,13 +7,18 @@ outside tmp_path, no network.
 from __future__ import annotations
 
 import json
+import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
+import anyio
 import pytest
 from mcp import Client
-from mcp.types import ToolAnnotations
+from mcp.types import TextContent, ToolAnnotations
 
 from sentinel.mcp_clients.registry import READ_TOOLS, REGISTRY, lookup, spec_by_name
 from sentinel.mcp_clients.tools import call_json
@@ -21,6 +26,7 @@ from sentinel.memory.sqlite_backend import SQLiteMemoryBackend
 from sentinel.permissions.actions import Action, Grant, PermissionDenied
 from sentinel.permissions.approvals import ApprovalError, ApprovalStore
 from sentinel.permissions.audit import AuditLog
+from sentinel.permissions.gate import ActionOutcome, ActionRunner
 from sentinel.permissions.policy import Policy
 from servers.fixtures import gmail_mcp, jira_mcp, notion_mcp
 from servers.memory_mcp import server as memory_mcp
@@ -278,6 +284,118 @@ def test_overdue_approvals_are_closed_and_their_arguments_dropped(
     record = store.get(pending.id)
     assert record is not None
     assert (record.status, record.args) == ("expired", None)
+
+
+def _raw_rows(db: Path) -> list[tuple[str, str | None]]:
+    conn = sqlite3.connect(db)
+    try:
+        return conn.execute(
+            "SELECT status, args_json FROM approvals ORDER BY created_at"
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def test_expired_requests_nobody_reopens_lose_their_arguments(tmp_path: Path) -> None:
+    db = tmp_path / "approvals.sqlite"
+    first = Clock()
+    ApprovalStore(db, ttl_s=600, clock=first).request(
+        DRAFT, risk="write", session="s1", principal="ishan"
+    )
+    assert b"Secret plan B." in db.read_bytes()
+
+    later = Clock()
+    later.now = T0 + timedelta(seconds=601)
+    ApprovalStore(db, ttl_s=600, clock=later)  # any later command opens the store
+
+    assert _raw_rows(db) == [("expired", None)]
+    assert b"Secret plan B." not in db.read_bytes()  # secure_delete zeroes the old cell
+
+
+def test_used_and_denied_requests_lose_their_arguments(tmp_path: Path, clock: Clock) -> None:
+    db = tmp_path / "approvals.sqlite"
+    store = ApprovalStore(db, ttl_s=600, clock=clock)
+    used = store.request(DRAFT, risk="write", session="s1", principal="ishan")
+    store.approve(used.id, session="s1", principal="ishan")
+    store.consume(used.id, DRAFT, session="s1", principal="ishan")
+    other = DRAFT.model_copy(update={"args": {**DRAFT.args, "body": "Second secret."}})
+    denied = store.request(other, risk="write", session="s1", principal="ishan")
+    store.deny(denied.id, session="s1", principal="ishan")
+
+    assert _raw_rows(db) == [("consumed", None), ("denied", None)]
+    raw = db.read_bytes()
+    assert b"Secret plan B." not in raw
+    assert b"Second secret." not in raw
+
+
+class RacingStore(ApprovalStore):
+    """Pauses consumers right after their checks, so both pass them before either commits."""
+
+    barrier = threading.Barrier(2)
+
+    def _open(self, approval_id: str, session: str, principal: str, *, expect: Any) -> Any:
+        approval = super()._open(approval_id, session, principal, expect=expect)
+        if expect == "approved":
+            self.barrier.wait(timeout=10)
+        return approval
+
+
+def _race(db: Path, approval_id: str, consume: Any) -> list[Any]:
+    RacingStore.barrier = threading.Barrier(2)
+    stores = [RacingStore(db, ttl_s=600) for _ in range(2)]  # two "processes"
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(consume, s, approval_id) for s in stores]
+        return [f.exception() or f.result() for f in futures]
+
+
+def test_concurrent_consumption_has_exactly_one_winner(tmp_path: Path) -> None:
+    db = tmp_path / "approvals.sqlite"
+    approval_id = _approved(ApprovalStore(db, ttl_s=600))
+
+    def consume(store: ApprovalStore, aid: str) -> Grant:
+        return store.consume(aid, DONE, session="s1", principal="ishan")
+
+    results = _race(db, approval_id, consume)
+    grants = [r for r in results if isinstance(r, Grant)]
+    refused = [r for r in results if isinstance(r, ApprovalError)]
+    assert len(grants) == 1
+    assert [e.reason for e in refused] == ["approval already used"]
+
+
+class CountingClient:
+    def __init__(self) -> None:
+        self.calls = 0
+        self._lock = threading.Lock()
+
+    async def call_tool(self, name: str, args: dict[str, Any], **_: Any) -> Any:
+        with self._lock:
+            self.calls += 1
+        payload = json.dumps({"key": args["key"], "status": args["status"]})
+        return SimpleNamespace(content=[TextContent(type="text", text=payload)], is_error=False)
+
+
+def test_concurrent_approved_runs_dispatch_the_write_at_most_once(tmp_path: Path) -> None:
+    db = tmp_path / "approvals.sqlite"
+    approval_id = _approved(ApprovalStore(db, ttl_s=600))
+    client = CountingClient()
+
+    def run(store: ApprovalStore, aid: str) -> ActionOutcome:
+        runner = ActionRunner(
+            store=store,
+            audit=AuditLog(),
+            policy=Policy(),
+            data_mode="fixture",
+            clients={"jira": client},  # type: ignore[dict-item]
+        )
+
+        async def go() -> ActionOutcome:
+            return await runner.execute(aid, session="s1", principal="ishan")
+
+        return anyio.run(go)
+
+    outcomes = _race(db, approval_id, run)
+    assert sorted(o.status for o in outcomes) == ["blocked", "succeeded"]
+    assert client.calls == 1
 
 
 def test_store_survives_reopening(tmp_path: Path, clock: Clock) -> None:

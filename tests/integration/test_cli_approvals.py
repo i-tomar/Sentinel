@@ -9,10 +9,15 @@ import json
 import re
 from pathlib import Path
 
+import anyio
 import pytest
 from typer.testing import CliRunner
 
 from sentinel.cli import app
+from sentinel.config import get_settings
+from sentinel.mcp_clients.pool import open_clients
+from sentinel.mcp_clients.tools import call_json
+from tests.integration.test_fixture_state import data_hashes
 
 pytestmark = pytest.mark.integration
 
@@ -62,6 +67,35 @@ def test_ask_proposes_and_approve_runs_exactly_once() -> None:
     assert events == ["proposed", "blocked", "approved", "attempted", "succeeded", "blocked"]
     raw = Path(".data/audit.jsonl").read_text(encoding="utf-8")
     assert "Set PROJ-142 to Done" not in raw  # the question itself is never logged
+
+
+async def _read_issue(key: str) -> dict[str, object]:
+    """Read through a fresh fixture server process, launched exactly as the CLI launches it."""
+    async with open_clients(get_settings(), ["jira"]) as clients:
+        issue: dict[str, object] = await call_json(clients["jira"], "get_issue", {"key": key})
+        return issue
+
+
+def test_approved_write_is_visible_to_later_commands() -> None:
+    before = data_hashes()
+    assert anyio.run(_read_issue, "PROJ-142")["status"] == "Blocked"  # fresh, isolated state
+
+    _, approval_id, session = _proposal("Set PROJ-142 to Done.")
+    assert anyio.run(_read_issue, "PROJ-142")["status"] == "Blocked"  # proposing changed nothing
+    done = runner.invoke(app, ["approve", approval_id, "--session", session])
+    assert done.exit_code == 0, done.output
+
+    assert anyio.run(_read_issue, "PROJ-142")["status"] == "Done"
+    later = runner.invoke(
+        app, ["ask", "What is the status of PROJ-142?", "--as-of", "2026-11-02", "--json"]
+    )
+    assert later.exit_code == 0, later.output
+    payload = json.loads(later.stdout)
+    assert "jira:PROJ-142" in payload["evidence_keys"]
+    [cited] = [c for c in payload["citations"] if c["doc_id"] == "PROJ-142"]
+    assert "Status: Done." in cited["snippet"]  # the agent read the changed record
+    assert Path(".data/fixture-state/jira.json").exists()  # inside this test's tmp dir
+    assert data_hashes() == before  # generated fixture data untouched
 
 
 def test_memory_write_waits_for_approval_through_the_cli() -> None:
