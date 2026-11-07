@@ -51,6 +51,9 @@ class Settings(BaseSettings):
     memory_db: Path = Path("./.data/memory.sqlite")
     memory_auto_approve: bool = False
     """Let the agent write long-term memory without approval. Fixture/eval data only."""
+    fixture_state_dir: Path = Path("./.data/fixture-state")
+    """Where fixture servers keep approved writes between commands (generated data untouched).
+    Delete the directory to reset the fixture data."""
     okf_dir: Path = Path("./.data/okf")
 
     # Tracing

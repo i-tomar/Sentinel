@@ -1,7 +1,8 @@
 """Fixture Gmail MCP server: search_threads, get_thread (read), create_draft (write),
 send (destructive).
 
-Nothing is ever delivered: drafts and "sent" messages live only in this server process's memory.
+Nothing is ever delivered. Drafts and "sent" ids live in this process's memory and, when a
+state directory is given (the CLI passes FIXTURE_STATE_DIR), in a local state file.
 Permission checks are the agent's job (permission gate), not the server's.
 """
 
@@ -9,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import date
+from pathlib import Path
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
@@ -30,6 +32,7 @@ from servers.fixtures.common import (
 )
 from servers.fixtures.generate import NOW
 from servers.fixtures.models import Draft, GmailThread, ThreadHit
+from servers.fixtures.state import FixtureState, state_dir_from_env
 
 SOURCE = "gmail"
 
@@ -52,11 +55,22 @@ def _in_range(thread: GmailThread, after: date | None, before: date | None) -> b
     )
 
 
-def create_server(threads: Sequence[GmailThread] | None = None) -> MCPServer:
+def create_server(
+    threads: Sequence[GmailThread] | None = None, state_dir: Path | None = None
+) -> MCPServer:
     by_id = {t.id: t for t in (load_gmail() if threads is None else threads)}
-    drafts: dict[str, Draft] = {}
-    sent: list[str] = []
+    state = FixtureState(SOURCE, state_dir)
+    saved = state.load()
+    drafts: dict[str, Draft] = {
+        k: Draft.model_validate(v) for k, v in saved.get("drafts", {}).items()
+    }
+    sent: list[str] = [str(d) for d in saved.get("sent", [])]
     server = MCPServer("gmail-fixture", instructions="Fake Acme mailbox (fixture data).")
+
+    def _save() -> None:
+        state.save(
+            {"drafts": {k: d.model_dump(mode="json") for k, d in drafts.items()}, "sent": sent}
+        )
 
     @server.tool(annotations=READ, structured_output=False)
     async def search_threads(
@@ -128,7 +142,7 @@ def create_server(threads: Sequence[GmailThread] | None = None) -> MCPServer:
         if thread_id is not None and thread_id not in by_id:
             raise ToolError(f"thread not found: {thread_id}")
         draft = Draft(
-            draft_id=f"draft-{len(drafts) + 1:04d}",
+            draft_id=f"draft-{len(drafts) + len(sent) + 1:04d}",  # ids are never reused
             to=tuple(a.strip().lower() for a in to),
             subject=subject,
             body=body,
@@ -136,6 +150,7 @@ def create_server(threads: Sequence[GmailThread] | None = None) -> MCPServer:
             created_at=NOW,
         )
         drafts[draft.draft_id] = draft
+        _save()
         return to_json(draft)
 
     @server.tool(annotations=DESTRUCTIVE, structured_output=False)
@@ -147,6 +162,7 @@ def create_server(threads: Sequence[GmailThread] | None = None) -> MCPServer:
         if draft is None:
             raise ToolError(f"draft not found: {draft_id}")
         sent.append(draft_id)
+        _save()
         return to_json(
             {"message_id": f"msg-{len(sent):04d}", "draft_id": draft_id, "to": list(draft.to)}
         )
@@ -155,4 +171,4 @@ def create_server(threads: Sequence[GmailThread] | None = None) -> MCPServer:
 
 
 if __name__ == "__main__":
-    create_server().run()
+    create_server(state_dir=state_dir_from_env()).run(transport="stdio")
