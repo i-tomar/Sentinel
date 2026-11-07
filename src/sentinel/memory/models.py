@@ -46,9 +46,11 @@ class MemoryWrite(BaseModel):
 
     op: Literal["put", "mark_stale"]
     key: str
-    status: Literal["written", "pending_approval", "skipped"]
+    status: Literal["written", "pending_approval", "skipped", "failed"]
     reason: str
     item: MemoryItem | None = None
+    approval_id: str | None = None
+    """The approval request covering this write (see `sentinel approve`)."""
 
 
 def memory_key(text: str) -> str:

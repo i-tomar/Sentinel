@@ -30,9 +30,11 @@ from sentinel.graph.state import (
     UnsupportedClaim,
 )
 from sentinel.memory.models import MemoryItem, MemoryWrite
+from sentinel.permissions.actions import ActionRecord
 from sentinel.retrieval.models import Chunk, Document
 
 STATE_MODELS: tuple[type[BaseModel], ...] = (
+    ActionRecord,
     Chunk,
     Citation,
     CitationReport,

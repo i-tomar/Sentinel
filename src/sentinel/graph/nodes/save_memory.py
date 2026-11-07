@@ -1,4 +1,4 @@
-"""Propose long-term memory writes after an answer, and apply them under the write policy.
+"""Propose long-term memory writes after an answer and send them through the permission gate.
 
 Two kinds of write:
 - mark_stale for notes that conflicted with a newer source record this turn;
@@ -19,9 +19,15 @@ from sentinel.memory.backend import MemoryBackend
 from sentinel.memory.freshness import support
 from sentinel.memory.models import MemoryItem, MemoryWrite, memory_key
 from sentinel.memory.policy import WriteDecision
+from sentinel.permissions.actions import Action
+from sentinel.permissions.approvals import ApprovalStore
+from sentinel.permissions.audit import AuditLog
+from sentinel.permissions.gate import ActionRunner, approve_action, request_action
+from sentinel.permissions.policy import DataMode, Policy
 from sentinel.text import split_sentences
 
 MAX_VALUE_CHARS = 500
+AUTO_APPROVE_REASON = "auto_approve_memory (fixture data only)"
 _MARKERS = re.compile(r"\s*\[\d{1,3}\]")
 
 
@@ -92,21 +98,75 @@ def propose_writes(
     return writes
 
 
-def apply_writes(
-    writes: Sequence[MemoryWrite], backend: MemoryBackend | None, decision: WriteDecision
+def memory_action(write: MemoryWrite) -> Action | None:
+    """The memory tool call a proposed write stands for (what the approval is bound to)."""
+    if write.item is None:
+        return None
+    if write.op == "put":
+        return Action(source="memory", tool="put_memory", args=write.item.model_dump(mode="json"))
+    return Action(
+        source="memory",
+        tool="mark_stale",
+        args={
+            "key": write.key,
+            "reason": write.reason[:300],
+            "superseded_by": write.item.superseded_by,
+        },
+    )
+
+
+async def gate_writes(
+    writes: Sequence[MemoryWrite],
+    *,
+    backend: MemoryBackend | None,
+    decision: WriteDecision,
+    policy: Policy,
+    data_mode: DataMode,
+    store: ApprovalStore,
+    audit: AuditLog,
+    session: str,
+    principal: str,
 ) -> list[MemoryWrite]:
-    """Execute allowed writes; leave the rest pending (approval flow arrives with step l)."""
-    applied: list[MemoryWrite] = []
-    for w in writes:
-        if w.status != "pending_approval" or backend is None or decision != "allow":
-            applied.append(w)
+    """Open an approval request for every proposed write. With the fixture-only auto-approve
+    flag (`decision == "allow"`) the request is approved on the user's behalf and run at
+    once, still through the gate and the audit log; otherwise it waits for `sentinel approve`."""
+    runner = ActionRunner(
+        store=store, audit=audit, policy=policy, data_mode=data_mode, memory=backend
+    )
+    out: list[MemoryWrite] = []
+    for write in writes:
+        action = memory_action(write)
+        if write.status != "pending_approval" or backend is None or action is None:
+            out.append(write)
             continue
-        if w.op == "put" and w.item is not None:
-            backend.put(w.item)
-        elif w.op == "mark_stale" and w.item is not None:
-            backend.mark_stale(w.key, w.reason, w.item.superseded_by)
-        applied.append(w.model_copy(update={"status": "written"}))
-    return applied
+        record = request_action(
+            action,
+            policy=policy,
+            data_mode=data_mode,
+            store=store,
+            audit=audit,
+            session=session,
+            principal=principal,
+        )
+        if record.approval_id is None:
+            out.append(write.model_copy(update={"status": "skipped", "reason": record.reason}))
+            continue
+        write = write.model_copy(update={"approval_id": record.approval_id})
+        if decision == "allow":
+            approve_action(
+                record.approval_id,
+                store=store,
+                audit=audit,
+                session=session,
+                principal=principal,
+                via="auto_approve_memory",
+                reason=AUTO_APPROVE_REASON,
+            )
+            outcome = await runner.execute(record.approval_id, session=session, principal=principal)
+            status = "written" if outcome.status == "succeeded" else "failed"
+            write = write.model_copy(update={"status": status})
+        out.append(write)
+    return out
 
 
 def flag_conflicts(

@@ -12,15 +12,19 @@ from sentinel.graph.nodes.answerer import build_messages
 from sentinel.graph.nodes.citation_check import check_answer
 from sentinel.graph.nodes.execute_tools import execute_calls
 from sentinel.graph.nodes.save_memory import (
-    apply_writes,
     fact_from_answer,
     flag_conflicts,
+    gate_writes,
     propose_writes,
 )
 from sentinel.graph.nodes.tool_router import MEMORY_BUCKET, memory_refresh_calls
 from sentinel.graph.state import CitationReport, Evidence
-from sentinel.memory.models import MemoryItem
+from sentinel.memory.models import MemoryItem, MemoryWrite
+from sentinel.memory.policy import WriteDecision
 from sentinel.memory.sqlite_backend import SQLiteMemoryBackend
+from sentinel.permissions.approvals import ApprovalStore
+from sentinel.permissions.audit import AuditLog
+from sentinel.permissions.policy import Policy
 from sentinel.retrieval.models import Source
 
 pytestmark = pytest.mark.unit
@@ -84,7 +88,24 @@ def test_no_fact_from_insufficient_or_flagged_answers(answer: str, report: Citat
     assert fact_from_answer("q", "Priya owns it [1].", [], CitationReport(), [V2]) is None
 
 
-def test_writes_are_pending_unless_allowed() -> None:
+async def _gate(
+    writes: list[MemoryWrite], backend: SQLiteMemoryBackend | None, decision: WriteDecision
+) -> list[MemoryWrite]:
+    return await gate_writes(
+        writes,
+        backend=backend,
+        decision=decision,
+        policy=Policy(),
+        data_mode="fixture",
+        store=ApprovalStore(":memory:"),
+        audit=AuditLog(),
+        session="s1",
+        principal="ishan",
+    )
+
+
+@pytest.mark.anyio
+async def test_writes_are_pending_unless_allowed() -> None:
     fact = _note("k", "Priya owns it", source="notion:auth-migration-v2", verified=True)
     stale = _note(
         "old",
@@ -103,17 +124,18 @@ def test_writes_are_pending_unless_allowed() -> None:
 
     backend = SQLiteMemoryBackend(":memory:")
     backend.put(stale.model_copy(update={"stale": False}))
-    pending = apply_writes(writes, backend, "require_approval")
+    pending = await _gate(writes, backend, "require_approval")
     assert [w.status for w in pending] == ["pending_approval", "pending_approval"]
+    assert all(w.approval_id for w in pending)
     assert backend.get("k") is None
     assert backend.get("old").stale is False  # type: ignore[union-attr]
 
-    written = apply_writes(writes, backend, "allow")
+    written = await _gate(writes, backend, "allow")
     assert [w.status for w in written] == ["written", "written"]
     assert backend.get("k") == fact
     assert backend.get("old").superseded_by == "notion:auth-migration-v2"  # type: ignore[union-attr]
 
-    assert [w.status for w in apply_writes(writes, None, "allow")] == ["pending_approval"] * 2
+    assert [w.status for w in await _gate(writes, None, "allow")] == ["pending_approval"] * 2
 
 
 def test_unchanged_fact_is_skipped() -> None:
