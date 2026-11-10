@@ -1,9 +1,11 @@
 """The permission gate: request approval for a proposed action, record the user's decision,
-and run an approved action exactly once.
+and send an approved action at most once.
 
 Proposing never executes. Execution re-checks the policy, consumes the approval (bound to
 session, user and argument fingerprint) and passes the resulting grant down to `call_json`,
-which verifies it again. Writes are not retried: a failed write needs a fresh approval.
+which verifies it again. Writes are never retried. A write the tool clearly rejected is
+`failed`; one that timed out, lost its connection, got a 5xx or an unreadable reply after it
+was sent is `uncertain` (it may have been applied): check the target before asking again.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ import anyio
 from mcp import Client
 from pydantic import BaseModel, ValidationError
 
+from sentinel.mcp_clients.failures import UNCERTAIN_WRITE
 from sentinel.mcp_clients.registry import summarize
 from sentinel.mcp_clients.tools import ToolCallError, call_json
 from sentinel.memory.backend import MemoryBackend
@@ -28,7 +31,8 @@ from sentinel.retrieval.models import Source
 
 class ActionOutcome(BaseModel):
     approval_id: str
-    status: Literal["succeeded", "failed", "blocked"]
+    status: Literal["succeeded", "failed", "uncertain", "blocked"]
+    """uncertain: the write was sent but its outcome is unknown (check the target record)."""
     reason: str | None = None
     result: dict[str, Any] | None = None
 
@@ -162,11 +166,11 @@ def _error_kind(exc: BaseException) -> str:
     if isinstance(exc, TimeoutError):
         return "timeout"
     if isinstance(exc, ToolCallError):
-        return "malformed_result" if "malformed" in str(exc) else "tool_error"
+        return exc.kind
     if isinstance(exc, PermissionDenied):
         return "permission_denied"
     if isinstance(exc, KeyError | TypeError | ValidationError):
-        return "unexpected_result"
+        return "invalid_response"
     return "backend_error"
 
 
@@ -225,6 +229,14 @@ class ActionRunner:
         if decision.verdict != "require_approval":
             reason = f"policy: {decision.reason}"
             return self._blocked(approval, approval_id, session, principal, reason, action)
+        connected = (
+            self.memory is not None
+            if action.source == "memory"
+            else (action.source in self.clients)
+        )
+        if not connected:  # nothing was sent, so the approval stays usable
+            reason = f"{action.source} is unavailable; the approval was not used"
+            return self._blocked(approval, approval_id, session, principal, reason, action)
         try:
             grant = self.store.consume(approval_id, action, session=session, principal=principal)
         except ApprovalError as exc:
@@ -236,18 +248,18 @@ class ActionRunner:
         try:
             with anyio.fail_after(self.timeout_s):
                 raw = await self._dispatch(action, grant)
-            result = _result_summary(action, raw)
         except Exception as exc:
-            kind = _error_kind(exc)
-            self.audit.record(
-                "failed",
+            return self._not_done(exc, action, approval_id, session, principal)
+        try:
+            result = _result_summary(action, raw)
+        except (KeyError, TypeError):  # it answered, but not as expected: did it apply?
+            return self._not_done(
+                ToolCallError("unexpected result", kind="invalid_response"),
                 action,
-                session=session,
-                principal=principal,
-                approval_id=approval_id,
-                reason=kind,
+                approval_id,
+                session,
+                principal,
             )
-            return ActionOutcome(approval_id=approval_id, status="failed", reason=kind)
         self.audit.record(
             "succeeded",
             action,
@@ -257,6 +269,30 @@ class ActionRunner:
             result=result,
         )
         return ActionOutcome(approval_id=approval_id, status="succeeded", result=result)
+
+    def _not_done(
+        self,
+        exc: BaseException,
+        action: Action,
+        approval_id: str,
+        session: str,
+        principal: str,
+    ) -> ActionOutcome:
+        """Record a write that did not clearly succeed. Never retried: if the target may
+        already have changed (timeout, crash, 5xx, unreadable reply) it is `uncertain`."""
+        kind = _error_kind(exc)
+        status: Literal["failed", "uncertain"] = (
+            "uncertain" if kind in UNCERTAIN_WRITE and action.source != "memory" else "failed"
+        )
+        self.audit.record(
+            status,
+            action,
+            session=session,
+            principal=principal,
+            approval_id=approval_id,
+            reason=kind,
+        )
+        return ActionOutcome(approval_id=approval_id, status=status, reason=kind)
 
     async def _dispatch(self, action: Action, grant: Grant) -> Any:
         if action.source == "memory":

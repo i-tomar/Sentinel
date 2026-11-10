@@ -25,7 +25,8 @@ AuditEvent = Literal[
     "denied",
     "attempted",  # grant consumed, call starting
     "succeeded",
-    "failed",
+    "failed",  # the tool clearly did not apply the write (rejected, rate limited, ...)
+    "uncertain",  # sent, but the outcome is unknown (timeout, crash, 5xx, unreadable reply)
     "blocked",  # execution refused: missing, denied, expired, used, mismatched approval
 ]
 
