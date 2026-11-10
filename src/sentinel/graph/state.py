@@ -9,6 +9,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from sentinel.citations import Citation
+from sentinel.mcp_clients.failures import FailureKind
 from sentinel.memory.models import MemoryItem, MemoryWrite
 from sentinel.permissions.actions import ActionRecord
 from sentinel.retrieval.models import SOURCES, Chunk, Document, Source
@@ -87,7 +88,9 @@ class ToolFailure(BaseModel):
     source: Source
     tool: str
     error: str
+    """A fixed description of `kind` (never the server's own error text, which is untrusted)."""
     attempts: int
+    kind: FailureKind = "tool_error"
 
 
 class Evidence(BaseModel):

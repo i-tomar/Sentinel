@@ -13,6 +13,7 @@ from mcp import Client
 from pydantic import BaseModel
 
 from sentinel.guards.redaction import redact_str
+from sentinel.mcp_clients.failures import describe
 from sentinel.mcp_clients.tools import NORMALIZERS, SOURCE_TOOLS, ToolCallError, call_json
 from sentinel.retrieval.chunking import DEFAULT_MAX_CHARS, DEFAULT_OVERLAP_CHARS, chunk_document
 from sentinel.retrieval.models import Document, Source
@@ -116,8 +117,9 @@ async def ingest(
         try:
             docs, complete = await fetch_documents_capped(source, client, now, max_records)
         except (ToolCallError, KeyError, TypeError, ValueError) as exc:
-            error = redact_str(f"{type(exc).__name__}: {exc}")
-            reports.append(SourceReport(source=source, error=error))
+            # server text is untrusted: report the kind, not the message
+            error = describe(exc.kind) if isinstance(exc, ToolCallError) else type(exc).__name__
+            reports.append(SourceReport(source=source, error=redact_str(error)))
             continue
         reports.append(sync_documents(store, source, docs, complete=complete))
     return reports
