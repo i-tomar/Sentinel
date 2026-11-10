@@ -4,7 +4,13 @@ START -> input_guard -+-> END (question flagged: refusal, nothing else runs)
                       +-> load_memory -> plan -> route -> execute_tools -> retrieve
                           -> retrieved_guard -> verify
     verify -+-> route (next hop)
-            +-> answer -> citation_check -> permission_gate -> save_memory -> record_turn -> END
+            +-> answer -> citation_check -> output_guard -> permission_gate -> save_memory
+                -> record_turn -> END
+
+PII: the question, tool results, index chunks, recalled memory and the model's reply are
+redacted as they enter the state, and output_guard checks the final answer and citations
+again, so prompts, traces, checkpoints (short-term memory) and long-term memory only hold
+redacted text. The raw question lives only in build_graph's closure for the current turn.
 
 permission_gate only proposes the writes the user's question asks for; they wait for
 `sentinel approve` (see sentinel.permissions). save_memory sends memory writes through the
@@ -40,6 +46,7 @@ from sentinel.graph.nodes.answerer import build_messages, insufficient_answer, i
 from sentinel.graph.nodes.citation_check import check_answer
 from sentinel.graph.nodes.execute_tools import ToolExecutor, execute_calls
 from sentinel.graph.nodes.input_guard import blocked_answer, check_question
+from sentinel.graph.nodes.output_guard import guard_output
 from sentinel.graph.nodes.permission_gate import actions_from_question
 from sentinel.graph.nodes.planner import Planner, RulePlanner
 from sentinel.graph.nodes.retrieve import assemble_evidence, relevant_chunks
@@ -76,6 +83,12 @@ from sentinel.graph.state import (
     new_turn_input,
 )
 from sentinel.guards.injection import InjectionDetector
+from sentinel.guards.redaction import (
+    redact_chunk,
+    redact_document,
+    redact_memory_item,
+    redact_str,
+)
 from sentinel.guards.sanitize import GuardMode
 from sentinel.memory.backend import MemoryBackend
 from sentinel.memory.freshness import find_conflicts
@@ -157,7 +170,11 @@ def _usage(reply: object) -> TokenUsage:
     )
 
 
-def build_graph(deps: Deps) -> Any:
+def build_graph(deps: Deps, raw_question: str | None = None) -> Any:
+    """`raw_question` is the user's question as typed. It stays in this closure for the turn
+    (input guard, write proposals) and is never written to state; `state.question` is the
+    PII-redacted copy that planning, prompts, traces and both memories see."""
+
     def traced(name: str, fn: Node) -> Node:
         async def run(state: AgentState) -> dict[str, Any]:
             with deps.tracer.start_as_current_span(f"node.{name}") as span:
@@ -169,7 +186,7 @@ def build_graph(deps: Deps) -> Any:
     async def input_guard(state: AgentState) -> dict[str, Any]:
         if deps.input_detector is None:
             return {"input_check": None}
-        check = check_question(state.question, deps.input_detector)
+        check = check_question(raw_question or state.question, deps.input_detector)
         with deps.tracer.start_as_current_span("guard.input") as span:
             span.set_attribute("sentinel.input.blocked", check.blocked)
             span.set_attribute("sentinel.input.score", check.score)
@@ -182,7 +199,7 @@ def build_graph(deps: Deps) -> Any:
     async def load_memory(state: AgentState) -> dict[str, Any]:
         if deps.memory is None:
             return {"memory_notes": []}
-        notes = deps.memory.search(state.question, MEMORY_NOTES)
+        notes = [redact_memory_item(n) for n in deps.memory.search(state.question, MEMORY_NOTES)]
         flagged: list[GuardNote] = []
         if deps.injection_detector is not None:
             notes, flagged = guard_memory(notes, deps.injection_detector, deps.guard_mode)
@@ -202,7 +219,7 @@ def build_graph(deps: Deps) -> Any:
             )
         return {
             "plan": result.sub_questions,
-            "errors": [*state.errors, *notes],
+            "errors": [*state.errors, *(redact_str(n) for n in notes)],
             "token_usage": state.token_usage + tokens,
         }
 
@@ -258,12 +275,15 @@ def build_graph(deps: Deps) -> Any:
         sq_docs = dict(state.sq_docs)
         for sq_id, keys in result.sq_docs.items():
             sq_docs[sq_id] = list(dict.fromkeys([*sq_docs.get(sq_id, []), *keys]))
+        # Records enter the state (and so every checkpoint) PII-redacted.
+        redacted = {key: redact_document(doc) for key, doc in result.documents.items()}
+        failures = [f.model_copy(update={"error": redact_str(f.error)}) for f in result.failures]
         return {
             "pending_calls": [],
             "tool_calls": [*state.tool_calls, *state.pending_calls],
-            "documents": {**state.documents, **result.documents},
+            "documents": {**state.documents, **redacted},
             "sq_docs": sq_docs,
-            "failures": [*state.failures, *result.failures],
+            "failures": [*state.failures, *failures],
         }
 
     async def retrieve(state: AgentState) -> dict[str, Any]:
@@ -280,7 +300,7 @@ def build_graph(deps: Deps) -> Any:
             for chunk in relevant_chunks(state.question, hits):
                 if chunk.chunk_id not in seen:
                     seen.add(chunk.chunk_id)
-                    chunks.append(chunk)
+                    chunks.append(redact_chunk(chunk))  # the index caches raw text
         return {"index_chunks": chunks, "candidates": candidates}
 
     async def retrieved_guard(state: AgentState) -> dict[str, Any]:
@@ -385,6 +405,7 @@ def build_graph(deps: Deps) -> Any:
                 )
             )
             text = reply.content if isinstance(reply.content, str) else str(reply.content)
+            text = redact_str(text)  # the model's own output is PII-checked before it is stored
             set_text(span, "langfuse.observation.output", text)
         return {
             "draft": text,
@@ -403,6 +424,12 @@ def build_graph(deps: Deps) -> Any:
             "insufficient_evidence": is_insufficient(final),
         }
 
+    async def output_guard(state: AgentState) -> dict[str, Any]:
+        answer, citations, kinds = guard_output(state.answer, state.citations)
+        with deps.tracer.start_as_current_span("guard.output") as span:
+            span.set_attribute("sentinel.output.redacted", kinds)
+        return {"answer": answer, "citations": citations, "output_redactions": kinds}
+
     async def permission_gate(state: AgentState) -> dict[str, Any]:
         records = [
             request_action(
@@ -414,7 +441,7 @@ def build_graph(deps: Deps) -> Any:
                 session=state.session_id,
                 principal=deps.principal,
             )
-            for action in actions_from_question(state.question)
+            for action in actions_from_question(raw_question or state.question)
         ]
         with deps.tracer.start_as_current_span("permission.propose") as span:
             span.set_attribute("sentinel.actions", [f"{r.source}.{r.tool}" for r in records])
@@ -473,6 +500,7 @@ def build_graph(deps: Deps) -> Any:
         ("verify", verify),
         ("answer", answer),
         ("citation_check", citation_check),
+        ("output_guard", output_guard),
         ("permission_gate", permission_gate),
         ("save_memory", save_memory),
         ("record_turn", record_turn),
@@ -494,7 +522,8 @@ def build_graph(deps: Deps) -> Any:
         "verify", lambda s: s.next_step, {"route": "route", "answer": "answer"}
     )
     graph.add_edge("answer", "citation_check")
-    graph.add_edge("citation_check", "permission_gate")
+    graph.add_edge("citation_check", "output_guard")
+    graph.add_edge("output_guard", "permission_gate")
     graph.add_edge("permission_gate", "save_memory")
     graph.add_edge("save_memory", "record_turn")
     graph.add_edge("record_turn", END)
@@ -530,6 +559,8 @@ class AskResult(BaseModel):
     memory_writes: list[MemoryWrite]
     actions: list[ActionRecord]
     """Writes the question asked for: awaiting approval, or refused by policy. None ran."""
+    output_redactions: list[str]
+    """PII kinds the output guard removed from the answer (records were redacted earlier)."""
     session_id: str
     """Approvals from this turn are bound to it; pass it to `sentinel approve`."""
     trace_id: str
@@ -546,7 +577,8 @@ async def ask_async(
 ) -> AskResult:
     """Answer one question. With `deps.checkpointer`, the turn joins `thread_id`'s short-term
     memory (a new id is generated when None); without one, nothing is remembered."""
-    graph = build_graph(deps)
+    redacted_question = redact_str(question)
+    graph = build_graph(deps, raw_question=question)
     chosen = list(sources or SOURCES)
     if deps.checkpointer is not None and thread_id is None:
         thread_id = uuid.uuid4().hex
@@ -556,13 +588,13 @@ async def ask_async(
     if thread_id is not None:
         config["configurable"] = {"thread_id": thread_id}
     session_id = thread_id or uuid.uuid4().hex
-    turn_input = new_turn_input(question, chosen, as_of or datetime.now(UTC), session_id)
+    turn_input = new_turn_input(redacted_question, chosen, as_of or datetime.now(UTC), session_id)
     with deps.tracer.start_as_current_span("sentinel.ask") as root:
         trace_id = trace_id_hex(root)
         root.set_attribute("langfuse.trace.name", "sentinel.ask")
         if thread_id is not None:
             root.set_attribute("langfuse.session.id", thread_id)  # groups a thread's traces
-        set_text(root, "langfuse.trace.input", question)
+        set_text(root, "langfuse.trace.input", redacted_question)
         started = time.perf_counter()
         out = await graph.ainvoke(turn_input, config=config)
         state = AgentState.model_validate(out)
@@ -578,7 +610,7 @@ async def ask_async(
         root.set_attribute("sentinel.citation_check.ok", state.citation_report.ok)
         root.set_attribute("sentinel.citations.unknown", len(state.citation_report.unknown))
     return AskResult(
-        question=question,
+        question=state.question,
         answer=state.answer,
         citations=state.citations,
         insufficient_evidence=state.insufficient_evidence,
@@ -599,6 +631,7 @@ async def ask_async(
         memory_notes=state.memory_notes,
         memory_writes=state.memory_writes,
         actions=state.actions,
+        output_redactions=state.output_redactions,
         session_id=state.session_id,
         trace_id=trace_id,
         latency_ms=latency_ms,

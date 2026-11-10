@@ -225,6 +225,9 @@ class AgentState(BaseModel):
     """Loaded notes; conflicting ones are flagged stale here even before the write lands."""
     memory_writes: list[MemoryWrite] = Field(default_factory=list)
 
+    output_redactions: list[str] = Field(default_factory=list)
+    """PII kinds the output guard removed from this turn's answer."""
+
     # writes the user asked for (proposed only; see permissions.gate)
     actions: list[ActionRecord] = Field(default_factory=list)
 
