@@ -255,7 +255,7 @@ async def test_approvals_do_not_cross_sessions(
     assert (await runner.execute(approval_id, session=s1, principal=ME)).status == "succeeded"
 
 
-async def test_tool_failure_is_recorded_and_not_retried(
+async def test_a_5xx_during_a_write_is_uncertain_and_not_retried(
     clients: dict[Source, Client],
     store: ApprovalStore,
     audit: AuditLog,
@@ -267,10 +267,10 @@ async def test_tool_failure_is_recorded_and_not_retried(
 
     runner = _runner(clients, store, audit)
     outcome = await runner.execute(approval_id, session=s1, principal=ME)
-    assert outcome.status == "failed"
-    assert outcome.reason == "tool_error"
-    assert _events(audit)[-2:] == ["attempted", "failed"]
-    assert audit.records[-1].reason == "tool_error"  # the error kind only, not the message
+    assert outcome.status == "uncertain"  # a 5xx may come after the write was applied
+    assert outcome.reason == "server_error"
+    assert _events(audit)[-2:] == ["attempted", "uncertain"]
+    assert audit.records[-1].reason == "server_error"  # the error kind only, not the message
     assert "Internal Server Error" not in audit.records[-1].model_dump_json()
     monkeypatch.delenv(failure_modes.FAILURES_ENV)
     again = await runner.execute(approval_id, session=s1, principal=ME)

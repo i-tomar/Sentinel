@@ -38,7 +38,7 @@ class FakeExecutor:
             await anyio.sleep(10)
         if self.fail_times > 0:
             self.fail_times -= 1
-            raise ToolCallError(f"{tool} failed: 500 Internal Server Error")
+            raise ToolCallError(f"{tool} failed: 500 Internal Server Error", kind="server_error")
         if tool == "search_pages":
             return self.payload if self.payload is not None else {"results": [{"id": "p1"}]}
         return PAGE
@@ -89,7 +89,7 @@ async def test_retry_gives_up_after_limit() -> None:
     assert result is None
     assert attempts == 3
     assert error is not None
-    assert "500" in error
+    assert error.kind == "server_error"
     assert len(ex.calls) == 3
     assert sleeps.waits == [0.25, 0.5]
 
@@ -101,7 +101,8 @@ async def test_timeout_is_enforced_per_attempt() -> None:
             ex, "notion", "get_page", {}, timeout_s=0.05, retries=1, backoff_s=0, sleep=sleeps
         )
     assert attempts == 2
-    assert error == "timed out after 0.05s"
+    assert error is not None
+    assert (error.kind, error.description) == ("timeout", "timed out after 0.05s")
 
 
 async def test_search_then_expand_and_reuse_known_docs() -> None:
@@ -132,4 +133,5 @@ async def test_disallowed_tool_is_never_called() -> None:
 async def test_unexpected_search_payload_is_a_failure() -> None:
     ex = FakeExecutor(payload={"rows": []})
     out = await execute_calls([_call()], ex, {}, timeout_s=1, retries=0, backoff_s=0)
-    assert out.failures[0].error.startswith("unexpected search payload")
+    assert out.failures[0].kind == "invalid_response"
+    assert out.failures[0].error == "invalid response (malformed or unexpected data)"

@@ -124,7 +124,7 @@ async def test_failing_source_leaves_index_untouched(
     monkeypatch.setenv(failure_modes.FAILURES_ENV, "gmail=error_500,notion.get_page=malformed")
     reports = {r.source: r for r in await ingest(clients, indexed, fetched_at=T2)}
     assert reports["gmail"].error is not None
-    assert "500" in reports["gmail"].error
+    assert "5xx" in reports["gmail"].error  # the kind, not the server's own message
     assert reports["notion"].error is not None
     assert "malformed" in reports["notion"].error
     assert reports["jira"].error is None
