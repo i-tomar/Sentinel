@@ -36,6 +36,45 @@ def strip_field_labels(text: str) -> str:
     return _FIELD_LABEL.sub(" ", text)
 
 
+_GMAIL_HEADER = re.compile(r"^(?P<label>From|To|Cc|Date): (?P<value>[^\n]*)$", re.M)
+_ADDRESS = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")
+
+
+def mask_generated_fields(text: str, source: str) -> str:
+    """Blank (same length, so offsets stay valid) what `gmail_document` itself generates on
+    its header lines: the fixed labels "From: ", "To: ", "Cc: ", "Date: ", each value that is
+    a complete email address, and a Date value that is an ISO timestamp.
+
+    For the injection scan only. Everything sender-controlled stays visible: display names,
+    raw headers that did not parse as an address, odd recipient strings, the subject (the
+    title) and the body. A body line that exactly imitates a header line, i.e. a label
+    followed only by valid addresses, is blanked too; it contains no words to scan.
+    """
+    if source != "gmail":
+        return text
+    chars = list(text)
+
+    def blank(start: int, end: int) -> None:
+        chars[start:end] = " " * (end - start)
+
+    for m in _GMAIL_HEADER.finditer(text):
+        start, value = m.start("value"), m.group("value")
+        blank(m.start("label"), start)
+        if m.group("label") == "Date":
+            try:
+                datetime.fromisoformat(value)
+            except ValueError:
+                continue
+            blank(start, m.end("value"))
+            continue
+        offset = start
+        for part in value.split(", "):
+            if _ADDRESS.fullmatch(part):
+                blank(offset, offset + len(part))
+            offset += len(part) + 2
+    return "".join(chars)
+
+
 class _Wire(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
