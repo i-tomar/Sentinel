@@ -12,6 +12,7 @@ from typing import Any
 from mcp import Client
 from pydantic import BaseModel
 
+from sentinel.guards.redaction import redact_str
 from sentinel.mcp_clients.tools import NORMALIZERS, SOURCE_TOOLS, ToolCallError, call_json
 from sentinel.retrieval.models import Source
 
@@ -62,5 +63,5 @@ async def smoke(source: Source, client: Client, timeout_s: float = 30.0) -> Smok
             report.fetched_id = doc.id
             report.text_chars = len(doc.text)
     except (ToolCallError, KeyError, TypeError, ValueError) as exc:
-        report.error = f"{type(exc).__name__}: {exc}"
+        report.error = redact_str(f"{type(exc).__name__}: {exc}")
     return report

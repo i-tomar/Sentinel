@@ -14,6 +14,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
+from sentinel.guards.redaction import redact_str
 from sentinel.mcp_clients.registry import lookup, summarize
 from sentinel.permissions.actions import Action
 
@@ -42,6 +43,12 @@ class AuditRecord(BaseModel):
     args: dict[str, Any]
     reason: str | None = None
     result: dict[str, Any] | None = None
+
+
+def _scrub(values: dict[str, Any]) -> dict[str, Any]:
+    """Second line of defence: summaries hold ids and counts, but run strings through the PII
+    redactor anyway in case a tool summary ever carries free text."""
+    return {k: redact_str(v) if isinstance(v, str) else v for k, v in values.items()}
 
 
 class AuditLog:
@@ -75,9 +82,9 @@ class AuditLog:
             tool=action.tool,
             risk=spec.risk if spec else None,
             action_hash=action.fingerprint(),
-            args=summarize(action.source, action.tool, action.args),
-            reason=reason,
-            result=result,
+            args=_scrub(summarize(action.source, action.tool, action.args)),
+            reason=redact_str(reason) if reason else reason,
+            result=_scrub(result) if result else result,
         )
         self.records.append(entry)
         if self.path is not None:
