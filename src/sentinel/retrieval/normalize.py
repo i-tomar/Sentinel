@@ -38,12 +38,16 @@ def strip_field_labels(text: str) -> str:
 
 _GMAIL_HEADER = re.compile(r"^(?P<label>From|To|Cc|Date): (?P<value>[^\n]*)$", re.M)
 _ADDRESS = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")
+REDACTED_EMAIL = "<EMAIL>"
+"""What the PII redactor leaves in place of an address (records are redacted before the
+injection scan), so a redacted header value is still the normalizer's own field."""
 
 
 def mask_generated_fields(text: str, source: str) -> str:
     """Blank (same length, so offsets stay valid) what `gmail_document` itself generates on
     its header lines: the fixed labels "From: ", "To: ", "Cc: ", "Date: ", each value that is
-    a complete email address, and a Date value that is an ISO timestamp.
+    a complete email address (or the redactor's "<EMAIL>" in its place), and a Date value
+    that is an ISO timestamp.
 
     For the injection scan only. Everything sender-controlled stays visible: display names,
     raw headers that did not parse as an address, odd recipient strings, the subject (the
@@ -69,7 +73,7 @@ def mask_generated_fields(text: str, source: str) -> str:
             continue
         offset = start
         for part in value.split(", "):
-            if _ADDRESS.fullmatch(part):
+            if _ADDRESS.fullmatch(part) or part == REDACTED_EMAIL:
                 blank(offset, offset + len(part))
             offset += len(part) + 2
     return "".join(chars)

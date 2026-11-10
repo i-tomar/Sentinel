@@ -71,7 +71,8 @@ _SENSITIVE = (
     r"(?:api[ _-]?keys?|credentials?|passwords?|secrets?|access tokens?|system prompt|"
     r"hidden instructions|customer list|team directory|payroll|all invoices)"
 )
-_EMAIL = r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+"
+# Retrieved text is PII-redacted before it is scanned, so "<EMAIL>" stands for an address.
+_EMAIL = r"(?:[\w.+-]+@[\w-]+(?:\.[\w-]+)+|<EMAIL>)"
 
 RULES: tuple[Rule, ...] = (
     Rule(
@@ -168,7 +169,8 @@ RULES: tuple[Rule, ...] = (
     Rule(
         "exfiltration",
         _r(
-            r"\b(?:send|forward|email|mail|cc|bcc|share|post|upload|leak|exfiltrate|bhej\w*|भेज\w*)"
+            # (?<!<): the redactor's "<EMAIL>" placeholder is not the verb "email"
+            r"(?<!<)\b(?:send|forward|email|mail|cc|bcc|share|post|upload|leak|exfiltrate|bhej\w*|भेज\w*)"
             rf"\b[^\n]{{0,60}}?{_EMAIL}|{_EMAIL}\s+(?:pe|par|पर)\s+(?:bhej|भेज)"
         ),
         0.35,
