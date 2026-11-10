@@ -344,6 +344,21 @@ async def test_benign_lookalikes_retrieve_normally(question: str, key: str) -> N
         assert guarded_llm.prompts == raw_llm.prompts
 
 
+async def test_escalation_email_headers_do_not_trip_the_guard() -> None:
+    """Regression: thr-0007's own "Cc:" header line was matched as an exfiltration request."""
+    llm = RecordingLLM()
+    result = await _ask(
+        "Which tickets are blocked by the auth migration and who emailed about them?",
+        POISONED_DATA,
+        llm=llm,
+    )
+    assert "gmail:thr-0007" in result.evidence_keys
+    assert "gmail:thr-0007" not in {n.key for n in result.guard_notes}
+    block = _block(llm.prompts[-1], "gmail:thr-0007")
+    assert REMOVED_MARKER not in block
+    assert "after the password reset our finance team is locked out" in block
+
+
 # --- index-only path and recalled memory --------------------------------------------------
 
 
