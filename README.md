@@ -620,6 +620,100 @@ seeded in the fixtures, not arbitrary real-world data.
   `memory list` and the `.data` files contain no PII or configured secret.
   `memory put` stores the redacted value.
 
+## Tool failures (step n)
+
+Sources fail: they time out, rate-limit, return 5xx or broken data, crash, or never start.
+Sentinel keeps answering from whatever still works, says what failed, and never guesses.
+
+```bash
+SENTINEL_FIXTURE_FAILURES="gmail=timeout" uv run sentinel ask "Which tickets are blocked by the auth migration and who emailed about them?"
+SENTINEL_FIXTURE_FAILURES="jira.startup=crash" uv run sentinel ask "..."   # a server that never starts
+SENTINEL_FIXTURE_FAILURES="*=error_500" uv run sentinel ask "..."          # nothing readable
+```
+
+Fixture failure modes:
+
+- `timeout`, `error_500`, `rate_limit` and `empty`;
+- `malformed` (truncated JSON) and `invalid_schema` (valid JSON of the wrong shape);
+- `crash` (the server process exits mid-call; subprocess only);
+- the rule `<source>.startup=crash` (the server exits before serving).
+
+**Reads:**
+
+- **Every failure gets a kind.** `call_json` turns everything that can go wrong into a
+  `ToolCallError` with a kind: `timeout`, `rate_limited`, `server_error`, `unavailable`
+  (failed to start, crashed, connection closed), `invalid_response`, `invalid_arguments`,
+  `not_found` or `tool_error`. Nothing else escapes it, so one bad source can't crash the
+  turn.
+- **Only transient errors are retried.** Timeouts, rate limits and 5xx get up to
+  `tool_retries` (default 2) more attempts with exponential backoff. Invalid arguments,
+  not-found, malformed data, a dead connection and permission refusals fail on the first
+  attempt.
+- **A failed source is skipped for the rest of the turn** (recorded as `skipped`). That
+  covers a source still failing after its retries, and one that is unavailable. No call
+  starts after `TOOL_BUDGET_S` (default 60 s) of tool time in the turn (`budget_exhausted`).
+  `MAX_HOPS`, the per-call `TOOL_TIMEOUT_S` and the verifier's single widening still apply,
+  so a failure can't cause a loop.
+- **Malformed search hits are dropped one by one.** Valid hits are still used, and like any
+  record they go through PII redaction and the retrieved-content guard.
+- **Server error text is never used.** It can echo the request, record content or an
+  attacker's instructions. Failures store, prompt, trace and print only a fixed description
+  of their kind ("server error (HTTP 5xx)", "timed out after 10s"...). Tool spans carry
+  `sentinel.tool.error_kind`. Ingestion reports the kind too.
+- **A server that fails to start** (`open_available_clients`) makes only its source
+  unavailable. `sentinel ask` and `chat` still answer, and `sentinel ingest` reports `FAIL`
+  for that source.
+
+**Answers:**
+
+- **Failed sources are always named.** If any source failed, the answer says
+  `I could not read <source> (<reason>), so this may be incomplete`, whatever the model
+  wrote.
+- **Citations only point to evidence that was returned.** A memory note whose source could
+  not be read this turn is treated as unverified, so the citation check removes any sentence
+  that states it as fact.
+- **When every source failed,** the reply says
+  `none of the sources could be read (...)`, with no citations and nothing guessed.
+- **Empty results are not failures.** They give the usual "not enough evidence" reply.
+
+**Writes** (approved actions, step l):
+
+- **Never retried.** A write the tool clearly rejected (rate limit, bad arguments,
+  not-found) is `failed`.
+- **Uncertain outcomes are reported as uncertain.** If a write was sent and then timed out,
+  lost its connection, got a 5xx or an unreadable reply, it may have been applied. It is
+  reported and audited as `uncertain`, and `sentinel approve` says to check the record
+  before requesting a new approval.
+- **The approval is kept if nothing was sent.** If the target server can't be started, the
+  approval is not consumed.
+
+**How it is tested:**
+
+- **Units** (`tests/unit/test_tool_failures.py`): classification, which errors are retried,
+  the source-down rule and the time budget, malformed search and record payloads, uncertain
+  versus failed writes, and the answer wording.
+- **In-process fixture servers** (`tests/integration/test_tool_failures.py`): one source
+  timing out, rate-limited, 5xx, malformed or schema-invalid, with honest partial answers
+  and citations only from returned evidence. Also empty results, partial results across
+  sources, every source failing, the time budget, a closed connection, a memory note from a
+  failed source, hostile error text, and odd records still guarded and redacted.
+- **Real stdio subprocesses:** a server crashing mid-call and one failing to start.
+- **CLI** (`tests/integration/test_cli_failures.py`): no traceback, a clear message, ingest
+  `FAIL`, and an `uncertain` write audited and not retried.
+
+**Limitations:**
+
+- **Kinds come from error text.** A server error is classified by matching its text, so an
+  unusual server message falls back to `tool_error`, which is not retried.
+- **No reconnecting.** A crashed or disconnected server stays down for the rest of the
+  command.
+- **A hanging server is not bounded at startup.** One that starts but never finishes the
+  MCP handshake is bounded only by the MCP SDK's own behaviour, not by `TOOL_BUDGET_S`.
+- **The budget is checked between calls.** A call that has started runs up to
+  `TOOL_TIMEOUT_S` (per attempt) even if the budget runs out meanwhile.
+- **"Uncertain" is deliberately conservative.** A 5xx or timeout is reported as uncertain
+  even when the server never applied the write.
+
 ## Asking questions
 
 ```bash
