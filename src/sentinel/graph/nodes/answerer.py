@@ -112,14 +112,31 @@ def insufficient_answer(
     failures: Sequence[ToolFailure] = (),
 ) -> str:
     searched = ", ".join(sources)
+    reasons = failure_reasons(failures)
+    if failures and set(sources) <= set(reasons):
+        listed = "; ".join(f"{s}: {r}" for s, r in reasons.items())
+        return (
+            f"{INSUFFICIENT_PREFIX} to answer this: none of the sources could be read "
+            f"({listed}). Nothing was guessed; try again later."
+        )
     text = (
         f"{INSUFFICIENT_PREFIX} to answer this. I searched {searched} for "
         f'"{question}" and found {candidates} candidate passage(s), none of them relevant.'
     )
     if failures:
-        failed = sorted({f.source for f in failures})
-        text += f" These sources could not be read: {', '.join(failed)}."
+        text += f" These sources could not be read: {', '.join(reasons)}."
     return text
+
+
+def failure_reasons(failures: Sequence[ToolFailure]) -> dict[str, str]:
+    """Failed source -> the first (most telling) failure description, sources sorted."""
+    reasons: dict[str, str] = {}
+    for f in failures:
+        if f.kind != "skipped":
+            reasons.setdefault(f.source, f.error)
+    for f in failures:
+        reasons.setdefault(f.source, f.error)
+    return dict(sorted(reasons.items()))
 
 
 def is_insufficient(answer: str) -> bool:
