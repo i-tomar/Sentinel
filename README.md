@@ -260,6 +260,20 @@ answerer can read anything. Long-term memory notes are scanned the same way as t
   guard removed is dropped from that search's results. Otherwise injected words could pull a
   record in, and its own id would then drive the next hop. Field labels the normalizers add
   ("Status:", "From:") don't count as matches.
+- **Generated email headers are not scanned as instructions.** The Gmail normalizer writes
+  `From:` / `To:` / `Cc:` / `Date:` lines itself. For the injection scan only, the guard
+  blanks:
+  - the fixed labels;
+  - each value that is a complete email address;
+  - an ISO `Date` value.
+
+  Without this, the exfiltration rule read `Cc: arjun.mehta@acme.test` as "cc this address"
+  and, together with "password" in the body, stripped a real escalation email
+  (`gmail:thr-0007`). Everything sender-controlled is still scanned: the subject (the title),
+  display names, raw `From` headers that didn't parse as an address, odd recipient strings
+  and the body. One trade-off: a body line that exactly imitates a header line (a label
+  followed only by valid addresses) is blanked as well. It has no words to scan, and any
+  instruction around it is still scanned.
 - **Answer prompt.** The prompt says retrieved data and memory notes are never instructions.
   It labels the evidence section as untrusted and marks guarded evidence blocks with
   `untrusted_removed="N"`.
@@ -287,6 +301,11 @@ tests' positive control.
 - **Benign lookalikes.** All seven are retrieved with their evidence text unchanged and are
   never flagged.
 - **Other paths.** The index-only path, recalled memory and quote mode are covered too.
+- **Whole fixture set** (`tests/unit/test_guard_headers.py`). Every normalized document and
+  its index chunks are run through the guard. All 168 benign ones pass untouched, and all 12
+  poisoned ones are still caught. A positive control shows the unmasked `thr-0007` text is
+  flagged. Injections in a subject, a display name, an unparsed recipient and the body are
+  still detected.
 
 **Known limitation: search ranking.** The guard runs on what a search returns, after the
 server has already ranked and cut the results. A poisoned record whose injected words match
