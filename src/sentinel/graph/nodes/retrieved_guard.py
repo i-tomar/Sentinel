@@ -17,14 +17,19 @@ from sentinel.guards.injection import InjectionDetector, InjectionResult
 from sentinel.guards.sanitize import GuardMode, mask_neutralized, neutralize
 from sentinel.memory.models import MEMORY_VALUE_MAX, MemoryItem
 from sentinel.retrieval.models import Chunk, Document
-from sentinel.retrieval.normalize import strip_field_labels
+from sentinel.retrieval.normalize import mask_generated_fields, strip_field_labels
 from sentinel.text import content_tokens
 
 TITLE_REMOVED = "[title removed: suspected injected instruction]"
 
 
-def _scan(detector: InjectionDetector, text: str) -> InjectionResult:
-    return detector.scan(mask_neutralized(text), origin="retrieved")
+def _scan(detector: InjectionDetector, text: str, source: str | None = None) -> InjectionResult:
+    """Scan with already-neutralized spans and, for record text, the normalizer's own header
+    fields blanked out (same length, so finding offsets still point into `text`)."""
+    visible = mask_neutralized(text)
+    if source is not None:
+        visible = mask_generated_fields(visible, source)
+    return detector.scan(visible, origin="retrieved")
 
 
 def _action(mode: GuardMode) -> Literal["removed", "quoted"]:
@@ -35,7 +40,7 @@ def guard_document(
     doc: Document, detector: InjectionDetector, mode: GuardMode
 ) -> tuple[Document, GuardNote | None]:
     title_result = _scan(detector, doc.title)
-    text_result = _scan(detector, doc.text)
+    text_result = _scan(detector, doc.text, doc.source)
     if not (title_result.flagged or text_result.flagged):
         return doc, None
     text, spans = neutralize(doc.text, text_result, mode)
@@ -54,7 +59,7 @@ def guard_chunk(
     chunk: Chunk, detector: InjectionDetector, mode: GuardMode
 ) -> tuple[Chunk, GuardNote | None]:
     title_result = _scan(detector, chunk.title)
-    text_result = _scan(detector, chunk.text)
+    text_result = _scan(detector, chunk.text, chunk.source)
     if not (title_result.flagged or text_result.flagged):
         return chunk, None
     text, spans = neutralize(chunk.text, text_result, mode)
