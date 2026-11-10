@@ -71,4 +71,6 @@ def create_server(pages: Sequence[NotionPage] | None = None) -> MCPServer:
 
 
 if __name__ == "__main__":
+    failure_modes.allow_crash()
+    failure_modes.exit_if_startup_fails(SOURCE)
     create_server().run(transport="stdio")

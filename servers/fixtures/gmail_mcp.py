@@ -171,4 +171,6 @@ def create_server(
 
 
 if __name__ == "__main__":
+    failure_modes.allow_crash()
+    failure_modes.exit_if_startup_fails(SOURCE)
     create_server(state_dir=state_dir_from_env()).run(transport="stdio")
