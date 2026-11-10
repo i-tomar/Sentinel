@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from sentinel.citations import Citation
 from sentinel.memory.models import MemoryItem, MemoryWrite
+from sentinel.permissions.actions import ActionRecord
 from sentinel.retrieval.models import SOURCES, Chunk, Document, Source
 
 Relation = Literal["search", "blocked_by", "mentions", "recall"]
@@ -176,6 +177,8 @@ class AgentState(BaseModel):
     as_of: datetime = Field(default_factory=lambda: datetime.now(UTC))
     """"Now" for relative dates such as "last week"."""
 
+    session_id: str = ""
+    """Approvals requested in this turn are bound to it (the thread id when there is one)."""
     input_check: InputCheck | None = None
     """None when the input guard is disabled."""
 
@@ -222,6 +225,9 @@ class AgentState(BaseModel):
     """Loaded notes; conflicting ones are flagged stale here even before the write lands."""
     memory_writes: list[MemoryWrite] = Field(default_factory=list)
 
+    # writes the user asked for (proposed only; see permissions.gate)
+    actions: list[ActionRecord] = Field(default_factory=list)
+
     # short-term memory: survives turns of the same thread via the checkpointer
     turns: list[TurnRecord] = Field(default_factory=list)
 
@@ -230,10 +236,12 @@ MEMORY_FIELDS = frozenset({"documents", "turns"})
 """Fields carried across turns of a thread. Every other field is reset for each new turn."""
 
 
-def new_turn_input(question: str, sources: list[Source], as_of: datetime) -> dict[str, Any]:
+def new_turn_input(
+    question: str, sources: list[Source], as_of: datetime, session_id: str = ""
+) -> dict[str, Any]:
     """Graph input for a new turn: fresh per-turn fields, memory fields omitted so the
     checkpointer keeps the thread's previous values (or the defaults for a new thread)."""
-    fresh = AgentState(question=question, sources=sources, as_of=as_of)
+    fresh = AgentState(question=question, sources=sources, as_of=as_of, session_id=session_id)
     return {
         name: getattr(fresh, name) for name in AgentState.model_fields if name not in MEMORY_FIELDS
     }

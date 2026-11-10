@@ -18,6 +18,7 @@ from sentinel.mcp_clients.tools import (
     ToolCallError,
     call_json,
 )
+from sentinel.permissions.actions import PermissionDenied
 from sentinel.retrieval.models import Document, Source, doc_key
 
 Sleep = Callable[[float], Awaitable[None]]
@@ -58,6 +59,8 @@ async def call_with_retry(
                 return await executor.call(source, tool, args), attempt, None
         except TimeoutError:
             error = f"timed out after {timeout_s:g}s"
+        except PermissionDenied:
+            return None, attempt, "tool not allowed"  # a refusal is final, never retried
         except ToolCallError as exc:
             error = str(exc)
         if attempt <= retries:

@@ -4,6 +4,11 @@ Backed by the same MemoryBackend the agent uses (SQLite at MEMORY_DB). Write too
 annotated as non-read-only so MCP clients and Sentinel's permission gate treat them as writes.
 Facts written through MCP are always stored unverified with source "mcp": only Sentinel's
 verifier, which checks a fact against its source record, may mark memory verified.
+
+Trust boundary: this server performs no authentication and no approval checks. Sentinel's
+permission gate only governs Sentinel's own calls; any client that launches this server can
+call put_memory / mark_stale directly. It is a local, single-user, stdio-only development
+server: do not expose it over a network transport or use it for shared or live deployments.
 """
 
 from __future__ import annotations
@@ -75,4 +80,4 @@ def create_server(backend: MemoryBackend | None = None) -> MCPServer:
 
 
 if __name__ == "__main__":
-    create_server().run()
+    create_server().run(transport="stdio")  # local only; see the trust boundary above

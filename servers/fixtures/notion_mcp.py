@@ -71,4 +71,4 @@ def create_server(pages: Sequence[NotionPage] | None = None) -> MCPServer:
 
 
 if __name__ == "__main__":
-    create_server().run()
+    create_server().run(transport="stdio")

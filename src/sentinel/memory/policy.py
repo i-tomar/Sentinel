@@ -1,8 +1,10 @@
 """Who may write long-term memory, and how a backend is chosen.
 
-Agent writes (saving a fact, marking one stale) are write operations:
-- live data: always pending human approval (the approval flow lands with the permission gate);
-- fixture/eval data: pending too, unless auto-approve was explicitly enabled.
+Agent writes (saving a fact, marking one stale) are write operations and go through the
+permission gate (`sentinel.permissions`):
+- live data: always pending human approval (`sentinel approve`);
+- fixture/eval data: pending too, unless auto-approve was explicitly enabled, in which case
+  the gate approves on the user's behalf and audits it.
 `Settings` refuses MEMORY_AUTO_APPROVE together with DATA_MODE=live, and so does `decide`.
 """
 

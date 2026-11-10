@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help sync lint fmt typecheck test check fixtures fixtures-check infra-env up up-qdrant down ps logs infra-check ingest search ask chat serve eval eval-fast baseline
+.PHONY: help sync lint fmt typecheck test check fixtures fixtures-check infra-env up up-qdrant down ps logs infra-check ingest search ask chat approvals approve deny serve eval eval-fast baseline
 
 UV ?= uv
 COMPOSE ?= docker compose --env-file .env.infra
@@ -75,6 +75,15 @@ ask: ## Ask one question with citations: make ask Q="..."
 
 chat: ## Multi-turn chat; continue a thread with T=<thread id>
 	$(UV) run sentinel chat $(if $(T),--thread $(T),)
+
+approvals: ## List approval requests (ids, status, tool; no arguments)
+	$(UV) run sentinel approvals
+
+approve: ## Approve and run one proposed write: make approve A=<approval id> S=<session id>
+	$(UV) run sentinel approve $(A) --session $(S)
+
+deny: ## Deny one proposed write: make deny A=<approval id> S=<session id>
+	$(UV) run sentinel deny $(A) --session $(S)
 
 serve: ## FastAPI on :8000                               [step l]
 	@echo "not implemented yet: lands in Phase 3 step l" && exit 1

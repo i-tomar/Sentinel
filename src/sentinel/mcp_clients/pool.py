@@ -12,11 +12,14 @@ import shlex
 import sys
 from collections.abc import AsyncIterator, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager
+from pathlib import Path
 
 from mcp import Client, StdioServerParameters
 
 from sentinel.config import Settings
 from sentinel.retrieval.models import Source
+
+STATE_DIR_ENV = "SENTINEL_FIXTURE_STATE_DIR"  # read by servers.fixtures.state
 
 FIXTURE_MODULES: dict[Source, str] = {
     "notion": "servers.fixtures.notion_mcp",
@@ -35,9 +38,12 @@ class LiveConfigError(RuntimeError):
     pass
 
 
-def fixture_server_params(source: Source) -> StdioServerParameters:
-    """stdio launch spec; forwards SENTINEL_FIXTURE_* (failure injection, data dir)."""
+def fixture_server_params(source: Source, state_dir: Path | None = None) -> StdioServerParameters:
+    """stdio launch spec; forwards SENTINEL_FIXTURE_* (failure injection, data dir) and the
+    local directory where approved fixture writes are kept between processes."""
     env = {k: v for k, v in os.environ.items() if k.startswith(_PASSTHROUGH_PREFIX)}
+    if state_dir is not None:
+        env[STATE_DIR_ENV] = str(state_dir.resolve())
     return StdioServerParameters(
         command=sys.executable, args=["-m", FIXTURE_MODULES[source]], env=env or None
     )
@@ -102,7 +108,7 @@ async def open_clients(
             params = (
                 live_server_params(source, settings)
                 if settings.data_mode == "live"
-                else fixture_server_params(source)
+                else fixture_server_params(source, settings.fixture_state_dir)
             )
             clients[source] = await stack.enter_async_context(Client(params))
         yield clients

@@ -4,7 +4,11 @@ START -> input_guard -+-> END (question flagged: refusal, nothing else runs)
                       +-> load_memory -> plan -> route -> execute_tools -> retrieve
                           -> retrieved_guard -> verify
     verify -+-> route (next hop)
-            +-> answer -> citation_check -> save_memory -> record_turn -> END
+            +-> answer -> citation_check -> permission_gate -> save_memory -> record_turn -> END
+
+permission_gate only proposes the writes the user's question asks for; they wait for
+`sentinel approve` (see sentinel.permissions). save_memory sends memory writes through the
+same gate.
 
 One span per node and per tool call. The plan is fixed by the planner from the user question;
 the loop can only route sub-questions already in it (or widen an empty search to the other
@@ -36,6 +40,7 @@ from sentinel.graph.nodes.answerer import build_messages, insufficient_answer, i
 from sentinel.graph.nodes.citation_check import check_answer
 from sentinel.graph.nodes.execute_tools import ToolExecutor, execute_calls
 from sentinel.graph.nodes.input_guard import blocked_answer, check_question
+from sentinel.graph.nodes.permission_gate import actions_from_question
 from sentinel.graph.nodes.planner import Planner, RulePlanner
 from sentinel.graph.nodes.retrieve import assemble_evidence, relevant_chunks
 from sentinel.graph.nodes.retrieved_guard import (
@@ -45,9 +50,9 @@ from sentinel.graph.nodes.retrieved_guard import (
     recheck_relevance,
 )
 from sentinel.graph.nodes.save_memory import (
-    apply_writes,
     fact_from_answer,
     flag_conflicts,
+    gate_writes,
     propose_writes,
 )
 from sentinel.graph.nodes.tool_router import (
@@ -76,6 +81,11 @@ from sentinel.memory.backend import MemoryBackend
 from sentinel.memory.freshness import find_conflicts
 from sentinel.memory.models import MemoryItem, MemoryWrite
 from sentinel.memory.policy import decide
+from sentinel.permissions.actions import ActionRecord
+from sentinel.permissions.approvals import ApprovalStore
+from sentinel.permissions.audit import AuditLog
+from sentinel.permissions.gate import request_action
+from sentinel.permissions.policy import Policy
 from sentinel.retrieval.models import SOURCES, Source
 from sentinel.retrieval.store import ChunkStore
 from sentinel.tracing import generation_attributes, set_text, trace_id_hex
@@ -114,6 +124,13 @@ class Deps:
     guard_mode: GuardMode = "remove"
     input_detector: InjectionDetector | None = field(default_factory=InjectionDetector)
     """Input guard for the user's question. None disables it (experiments only)."""
+    policy: Policy = field(default_factory=Policy)
+    approvals: ApprovalStore = field(default_factory=lambda: ApprovalStore(":memory:"))
+    """Where proposed writes wait for approval (the CLI uses APPROVAL_DB)."""
+    audit: AuditLog = field(default_factory=AuditLog)
+    """Audit trail of proposed and executed writes (the CLI appends to AUDIT_LOG)."""
+    principal: str = "local-user"
+    """Who is asking; approvals are bound to this user and the session."""
 
 
 def _model_name(llm: BaseChatModel) -> str:
@@ -386,6 +403,24 @@ def build_graph(deps: Deps) -> Any:
             "insufficient_evidence": is_insufficient(final),
         }
 
+    async def permission_gate(state: AgentState) -> dict[str, Any]:
+        records = [
+            request_action(
+                action,
+                policy=deps.policy,
+                data_mode=deps.data_mode,
+                store=deps.approvals,
+                audit=deps.audit,
+                session=state.session_id,
+                principal=deps.principal,
+            )
+            for action in actions_from_question(state.question)
+        ]
+        with deps.tracer.start_as_current_span("permission.propose") as span:
+            span.set_attribute("sentinel.actions", [f"{r.source}.{r.tool}" for r in records])
+            span.set_attribute("sentinel.actions.status", [r.status for r in records])
+        return {"actions": records}
+
     async def save_memory(state: AgentState) -> dict[str, Any]:
         if deps.memory is None:
             return {"memory_writes": []}
@@ -395,7 +430,17 @@ def build_graph(deps: Deps) -> Any:
         )
         conflicting = [n for n in state.memory_notes if n.stale]
         existing = deps.memory.get(fact.key) if fact is not None else None
-        writes = apply_writes(propose_writes(conflicting, fact, existing), deps.memory, decision)
+        writes = await gate_writes(
+            propose_writes(conflicting, fact, existing),
+            backend=deps.memory,
+            decision=decision,
+            policy=deps.policy,
+            data_mode=deps.data_mode,
+            store=deps.approvals,
+            audit=deps.audit,
+            session=state.session_id,
+            principal=deps.principal,
+        )
         with deps.tracer.start_as_current_span("memory.save") as span:
             span.set_attribute("sentinel.memory.decision", decision)
             span.set_attribute("sentinel.memory.writes", [f"{w.op}:{w.status}" for w in writes])
@@ -428,6 +473,7 @@ def build_graph(deps: Deps) -> Any:
         ("verify", verify),
         ("answer", answer),
         ("citation_check", citation_check),
+        ("permission_gate", permission_gate),
         ("save_memory", save_memory),
         ("record_turn", record_turn),
     ):
@@ -448,7 +494,8 @@ def build_graph(deps: Deps) -> Any:
         "verify", lambda s: s.next_step, {"route": "route", "answer": "answer"}
     )
     graph.add_edge("answer", "citation_check")
-    graph.add_edge("citation_check", "save_memory")
+    graph.add_edge("citation_check", "permission_gate")
+    graph.add_edge("permission_gate", "save_memory")
     graph.add_edge("save_memory", "record_turn")
     graph.add_edge("record_turn", END)
     return graph.compile(checkpointer=deps.checkpointer)
@@ -481,6 +528,10 @@ class AskResult(BaseModel):
     memory_notes: list[MemoryItem]
     """Long-term memory consulted this turn (with this turn's conflicts flagged stale)."""
     memory_writes: list[MemoryWrite]
+    actions: list[ActionRecord]
+    """Writes the question asked for: awaiting approval, or refused by policy. None ran."""
+    session_id: str
+    """Approvals from this turn are bound to it; pass it to `sentinel approve`."""
     trace_id: str
     latency_ms: int
     token_usage: TokenUsage
@@ -504,7 +555,8 @@ async def ask_async(
     config: dict[str, Any] = {"recursion_limit": 10 + 6 * deps.max_hops}
     if thread_id is not None:
         config["configurable"] = {"thread_id": thread_id}
-    turn_input = new_turn_input(question, chosen, as_of or datetime.now(UTC))
+    session_id = thread_id or uuid.uuid4().hex
+    turn_input = new_turn_input(question, chosen, as_of or datetime.now(UTC), session_id)
     with deps.tracer.start_as_current_span("sentinel.ask") as root:
         trace_id = trace_id_hex(root)
         root.set_attribute("langfuse.trace.name", "sentinel.ask")
@@ -546,6 +598,8 @@ async def ask_async(
         turn=len(state.turns),
         memory_notes=state.memory_notes,
         memory_writes=state.memory_writes,
+        actions=state.actions,
+        session_id=state.session_id,
         trace_id=trace_id,
         latency_ms=latency_ms,
         token_usage=state.token_usage,
