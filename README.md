@@ -516,6 +516,110 @@ uv run sentinel approve apr-... --session ... --confirm "send draft-0001"   # de
   not continue its answer after the write runs, and an API or UI flow that pauses and
   resumes a thread is not built yet.
 
+## PII redaction of outputs, traces, memory and logs (step m)
+
+Sentinel runs the step (j) detector (`sentinel.guards.pii`) on everything that can leave the
+agent, and replaces each match with a placeholder such as `<EMAIL>` or `<PHONE_IN>`.
+Ticket, page and thread ids, citation numbers and URLs are kept, so citations still resolve.
+
+**Where it runs:**
+
+- **The question.** The redacted question is what goes into the agent state, planning,
+  prompts, traces and both memories. The raw question exists only for the current turn: the
+  input guard scans it, and write proposals read it, because a draft needs the real recipient.
+- **Retrieved data.** Tool results, index chunks and recalled memory notes are redacted as
+  they enter the agent state, before the injection guard, the prompt or any checkpoint sees
+  them. The injection rules treat `<EMAIL>` as an address, so redaction doesn't weaken them.
+- **The model's reply and the answer.** The reply is redacted before it is stored. An
+  `output_guard` node then checks the final answer and its citations' titles and snippets
+  again before they are shown. The CLI prints `output guard: removed PII from the answer (...)`
+  when that second pass finds something.
+- **Traces.** `set_text` redacts at write time. `RedactingSpanExporter` redacts again, inside
+  the process before export: every string attribute, event (including recorded exceptions'
+  messages and stack traces) and span status description. A blocked question is recorded in
+  its redacted form.
+- **Short-term memory.** Checkpoints store the agent state, which only ever held redacted
+  text.
+- **Long-term memory.** The SQLite backend redacts the value and stale reason on every
+  write: the agent's, `sentinel memory put`'s and the memory MCP server's. So
+  `sentinel memory put k "call +91 ..."` stores `call <PHONE_IN>`.
+- **Audit log.** It holds per-tool summaries (counts, domains, ids, hashes) as before, and
+  now also passes their strings and the reason through the redactor.
+- **Error text.** Tool failure messages, ingestion and smoke-test errors, and CLI error
+  messages are redacted. Crash output never prints local variables
+  (`pretty_exceptions_show_locals=False`).
+- **CLI output.** Answers, sources, `--json`, `sentinel search` snippets and
+  `sentinel memory list` are redacted.
+
+**Choice:** the brief doesn't say what memories should keep, so both short- and long-term
+memory store the redacted version, consistent with "PII redaction on output, logs and
+traces".
+
+**What is detected:**
+
+| Kind | How |
+|---|---|
+| Email addresses | regex (Presidio's email recognizer fetches the public-suffix list, so it is not used) |
+| Indian phone numbers, PAN, Aadhaar-like numbers | custom regexes with digit-group boundaries |
+| International phone numbers | Presidio `PhoneRecognizer` (libphonenumber) |
+| Credit cards (Luhn-checked), IBAN, IP addresses, US SSN, crypto addresses | Presidio recognizers with checksums or validation |
+
+**What is not detected:**
+
+- **Names, organisations and locations.** spaCy runs as a blank pipeline, with no model
+  download and no NER, so "Priya Sharma" or "Pune" stay as written.
+- **Postal addresses, dates of birth, passport, licence and bank account numbers.** No
+  recognizer is enabled for them; several fire on ticket ids and dates.
+- **URLs.** They are kept on purpose for citations, so PII inside a URL is not redacted.
+- **Secrets in free text.** API keys or passwords that someone types or that appear in a
+  record are not detected. There is no secret scanner. Sentinel's own configured secrets
+  never enter a prompt, trace or log.
+- **Unusual formats.** Numbers written in an unusual format, or split across lines, can be
+  missed.
+
+**What stays raw:**
+
+- **Sources and caches.** The source systems, the local Qdrant index (a cache of source
+  text) and the fixture state files (simulated mailboxes and tickets) keep raw text.
+- **Open approval requests.** These keep the exact arguments they will execute (a draft's
+  recipient and body) until they are used, denied or expire (step l).
+
+**Trade-offs:**
+
+- **Lost detail in answers.** Answers lose colleagues' addresses and phone numbers, even
+  where the user may be allowed to see them (the brief's benign lookalikes include a
+  signature phone number). The record is still cited, so the user can open it.
+- **Some searches can't run.** Questions that search by an email address or phone number
+  can't do so, because the planner only sees the redacted question.
+
+This is **not complete PII removal.** The tests check every PII kind above and every value
+seeded in the fixtures, not arbitrary real-world data.
+
+**How it is tested:**
+
+- **Every fixture document and every PII kind through every path**
+  (`tests/unit/test_redaction_paths.py`). Each of the 180 fixture documents, and one sample
+  of each detected kind, goes through:
+  - the redacted record and its chunks;
+  - evidence and citation rendering;
+  - the prompt;
+  - the answer after the output guard;
+  - trace export, with attributes, events, exceptions and status set raw on purpose;
+  - long-term memory;
+  - the audit log.
+
+  No raw value may come out.
+- **End to end with tracing on** (`tests/integration/test_redaction_end_to_end.py`, in-memory
+  exporter, no Langfuse). PII-heavy questions, a question containing PII, a blocked
+  question and a draft request are run. Then answers, results, every exported span, the
+  checkpoint database, the memory database, the audit log and the approval database are
+  scanned for every sample, every seeded value and every fixture email address.
+- **Answers stay useful.** The 3-hop answer keeps citations from two or more sources and
+  its ticket evidence, every citation keeps its URL, and the owner's name stays visible.
+- **CLI** (`tests/integration/test_cli_redaction.py`). `ask` and `--json`, `search`,
+  `memory list` and the `.data` files contain no PII or configured secret.
+  `memory put` stores the redacted value.
+
 ## Asking questions
 
 ```bash

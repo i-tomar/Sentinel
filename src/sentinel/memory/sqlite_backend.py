@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
+from sentinel.guards.redaction import redact_memory_item
 from sentinel.memory.backend import rank
 from sentinel.memory.models import MemoryItem
 
@@ -81,6 +82,9 @@ class SQLiteMemoryBackend:
         return None if row is None else self._row(row)
 
     def put(self, item: MemoryItem) -> MemoryItem:
+        """Insert or replace. The value and stale reason are PII-redacted first, whoever the
+        writer is (agent, CLI, memory MCP server): long-term memory never holds raw PII."""
+        item = redact_memory_item(item)
         with self._connect() as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO memory_items "  # noqa: S608 - constant column list

@@ -26,6 +26,7 @@ from sentinel.graph.checkpoint import open_checkpointer
 from sentinel.graph.nodes.execute_tools import MCPToolExecutor
 from sentinel.graph.nodes.planner import make_planner
 from sentinel.guards.injection import InjectionDetector
+from sentinel.guards.redaction import redact_chunk, redact_str
 from sentinel.live.gmail import API as GMAIL_API
 from sentinel.live.gmail import READONLY_SCOPE
 from sentinel.live.gmail import TOKEN_URL as GMAIL_TOKEN_URL
@@ -56,8 +57,15 @@ from sentinel.retrieval.models import SOURCES, SearchMode, Source
 from sentinel.retrieval.store import ChunkStore, make_qdrant_client
 from sentinel.tracing import build_tracer_provider, get_tracer
 
-app = typer.Typer(name="sentinel", no_args_is_help=True, add_completion=False)
-infra_app = typer.Typer(no_args_is_help=True, help="Local Docker Compose infrastructure.")
+# Crash output must not print local variables: they can hold a raw question or record text.
+app = typer.Typer(
+    name="sentinel", no_args_is_help=True, add_completion=False, pretty_exceptions_show_locals=False
+)
+infra_app = typer.Typer(
+    no_args_is_help=True,
+    help="Local Docker Compose infrastructure.",
+    pretty_exceptions_show_locals=False,
+)
 app.add_typer(infra_app, name="infra")
 
 InfraEnvPath = Annotated[Path, typer.Option("--path", help="Compose secrets file.")]
@@ -147,7 +155,7 @@ def search(
         return
     resolver = CitationResolver()
     for hit in hits:
-        citation = resolver.add(hit.chunk)
+        citation = resolver.add(redact_chunk(hit.chunk))  # the index caches raw text
         typer.echo(f"{hit.score:.4f} [{citation.n}] {hit.chunk.doc_key}#{hit.chunk.index}")
     typer.echo(resolver.render())
 
@@ -291,7 +299,7 @@ def _agent_deps(
     try:
         memory = make_memory_backend(settings)
     except NotImplementedError as exc:
-        typer.echo(str(exc), err=True)
+        typer.echo(redact_str(str(exc)), err=True)
         raise typer.Exit(2) from exc
     return Deps(
         store=store,
@@ -358,6 +366,9 @@ def _print_result(result: AskResult, settings: Settings) -> None:
     check = result.input_check
     if check is not None and check.blocked:
         typer.echo(f"  input guard: blocked (score {check.score}; {', '.join(check.rules)})")
+    if result.output_redactions:
+        kinds = ", ".join(result.output_redactions)
+        typer.echo(f"  output guard: removed PII from the answer ({kinds})")
     for guard in result.guard_notes:
         typer.echo(
             f"  guard: {guard.action} {guard.spans} suspected instruction(s) from {guard.key} "
@@ -518,7 +529,9 @@ def _require_live_ready(settings: Settings, sources: list[Source]) -> list[Sourc
 
 
 live_app = typer.Typer(
-    no_args_is_help=True, help="Live (read-only) connectors: readiness, smoke test, Gmail consent."
+    pretty_exceptions_show_locals=False,
+    no_args_is_help=True,
+    help="Live (read-only) connectors: readiness, smoke test, Gmail consent.",
 )
 app.add_typer(live_app, name="live")
 
@@ -611,6 +624,7 @@ def live_gmail_auth(
 
 
 memory_app = typer.Typer(
+    pretty_exceptions_show_locals=False,
     no_args_is_help=True,
     help="Long-term memory. Writes here are made by you, so they need no further approval.",
 )
@@ -623,7 +637,7 @@ def _print_items(items: list[MemoryItem]) -> None:
     for i in items:
         flags = ",".join(f for f, on in (("verified", i.verified), ("stale", i.stale)) if on)
         typer.echo(
-            f"{i.key}: {i.value}\n    source={i.source} updated={i.updated_at.date()} "
+            f"{i.key}: {redact_str(i.value)}\n    source={i.source} updated={i.updated_at.date()} "
             f"confidence={i.confidence:.2f} {flags or 'unverified'}"
             + (f" stale_reason={i.stale_reason}" if i.stale_reason else "")
         )
@@ -633,7 +647,7 @@ def _memory() -> MemoryBackend:
     try:
         return make_memory_backend(get_settings())
     except NotImplementedError as exc:
-        typer.echo(str(exc), err=True)
+        typer.echo(redact_str(str(exc)), err=True)
         raise typer.Exit(2) from exc
 
 

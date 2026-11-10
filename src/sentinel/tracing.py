@@ -20,7 +20,7 @@ from opentelemetry.sdk.trace.export import (
     SpanExporter,
     SpanExportResult,
 )
-from opentelemetry.trace import Span, Tracer
+from opentelemetry.trace import Span, Status, Tracer
 from opentelemetry.util.types import Attributes
 
 from sentinel import __version__
@@ -53,7 +53,9 @@ def _redact_attributes(attributes: Attributes) -> dict[str, object]:
 
 
 class RedactingSpanExporter(SpanExporter):
-    """Defense in depth: re-redacts every string attribute and event before export."""
+    """Defense in depth: re-redacts every string attribute, event (including recorded
+    exceptions' messages and stack traces) and status description before export, so nothing
+    unredacted leaves the process even if a caller bypassed `set_text`."""
 
     def __init__(self, inner: SpanExporter) -> None:
         self.inner = inner
@@ -72,7 +74,10 @@ class RedactingSpanExporter(SpanExporter):
                 ],
                 links=s.links,
                 kind=s.kind,
-                status=s.status,
+                status=Status(
+                    s.status.status_code,
+                    redact_text(s.status.description) if s.status.description else None,
+                ),
                 start_time=s.start_time,
                 end_time=s.end_time,
                 instrumentation_scope=s.instrumentation_scope,

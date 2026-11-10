@@ -270,7 +270,8 @@ async def test_tool_failure_is_recorded_and_not_retried(
     assert outcome.status == "failed"
     assert outcome.reason == "tool_error"
     assert _events(audit)[-2:] == ["attempted", "failed"]
-    assert "500" not in str(audit.records[-1].model_dump())  # error kind only, not the message
+    assert audit.records[-1].reason == "tool_error"  # the error kind only, not the message
+    assert "Internal Server Error" not in audit.records[-1].model_dump_json()
     monkeypatch.delenv(failure_modes.FAILURES_ENV)
     again = await runner.execute(approval_id, session=s1, principal=ME)
     assert again.status == "blocked"  # a failed write needs a fresh approval

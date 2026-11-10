@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from mcp import Client
 from pydantic import BaseModel
 
+from sentinel.guards.redaction import redact_str
 from sentinel.mcp_clients.tools import NORMALIZERS, SOURCE_TOOLS, ToolCallError, call_json
 from sentinel.retrieval.chunking import DEFAULT_MAX_CHARS, DEFAULT_OVERLAP_CHARS, chunk_document
 from sentinel.retrieval.models import Document, Source
@@ -115,7 +116,8 @@ async def ingest(
         try:
             docs, complete = await fetch_documents_capped(source, client, now, max_records)
         except (ToolCallError, KeyError, TypeError, ValueError) as exc:
-            reports.append(SourceReport(source=source, error=f"{type(exc).__name__}: {exc}"))
+            error = redact_str(f"{type(exc).__name__}: {exc}")
+            reports.append(SourceReport(source=source, error=error))
             continue
         reports.append(sync_documents(store, source, docs, complete=complete))
     return reports

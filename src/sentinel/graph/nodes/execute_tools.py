@@ -11,6 +11,7 @@ import anyio
 from mcp import Client
 
 from sentinel.graph.state import ToolCall, ToolFailure
+from sentinel.guards.redaction import redact_str
 from sentinel.mcp_clients.tools import (
     NORMALIZERS,
     READ_TOOLS,
@@ -62,7 +63,7 @@ async def call_with_retry(
         except PermissionDenied:
             return None, attempt, "tool not allowed"  # a refusal is final, never retried
         except ToolCallError as exc:
-            error = str(exc)
+            error = redact_str(str(exc))  # server error text may echo record content
         if attempt <= retries:
             await sleep(backoff_s * 2 ** (attempt - 1))
     return None, retries + 1, error
