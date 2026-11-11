@@ -734,8 +734,35 @@ unapproved write, PII leak or hallucinated citation, and compares everything els
 owner-approved baseline. It never writes that baseline itself, and it fails if the baseline
 is missing or was edited.
 
-Datasets, the harness and CI come in steps (p) and (q). **No eval numbers exist yet:
-`TBD (run make eval)`.**
+## Eval datasets and harness (step p)
+
+```bash
+make eval                                    # = uv run python -m evals.run; mock LLM, fixtures
+uv run python -m evals.run --category adversarial_user --report-only
+uv run python -m evals.run --llm configured  # opt-in real model (LLM_PROVIDER/MODEL/API_KEY)
+```
+
+- **Datasets.** 124 versioned cases in `evals/datasets/` (see
+  [docs/eval-design.md](docs/eval-design.md)): answers and citations, stale vs current
+  records, follow-ups, no-answer questions, memory freshness, input and retrieved attacks,
+  benign lookalikes, permissions, PII and tool failures.
+- **The harness.** It runs every case through the real agent graph on in-process fixture
+  servers with the mock LLM. It writes `reports/report.md` and `reports/metrics.json` with
+  sample sizes and 95% intervals, separately for `all`, `dev` and `heldout`, and runs the
+  gate. It never writes a baseline, and it exits 1 while none is approved.
+- **Which split numbers come from:**
+  - `dev` may reuse the fixture payloads and the detector's samples or rule wording.
+  - `heldout` (attack and benign cases) was written independently of both, and the guards
+    weren't tuned on it.
+  - Any number presented as how well the guards generalise must be the `heldout` column, with
+    its `n`.
+- **Mock runs are not model results.** The mock LLM copies evidence sentences and never
+  follows instructions, so a mock run's attack block rate says little about resistance to
+  manipulation. Its answer accuracy reflects sentence picking, not a model. The guard
+  diagnostics ("input attacks refused", "retrieved attacks flagged") are what a mock run does
+  measure.
+- **No published numbers yet.** README results will come only from a recorded real-model run
+  (step s): `TBD (run make eval)`.
 
 ## Asking questions
 
