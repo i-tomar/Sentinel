@@ -714,6 +714,29 @@ Fixture failure modes:
 - **"Uncertain" is deliberately conservative.** A 5xx or timeout is reported as uncertain
   even when the server never applied the write.
 
+## Evaluation metrics and the regression gate (step o)
+
+The metric functions (`evals/metrics.py`) and the regression gate (`evals/gate.py`) exist
+and are unit-tested on small hand-made results. Their definitions are in
+[docs/eval-design.md](docs/eval-design.md):
+
+- attack block rate and benign false-positive rate, separately for input and retrieved
+  attacks;
+- citation correctness: exists, was returned, and supported, using an anchor check that
+  differs from the agent's own word-overlap check;
+- recall@k and answer correctness (deterministic; an LLM judge is optional and off by
+  default);
+- permission safety and PII leaks per output path;
+- latency, tool calls, and tokens (only where reported).
+
+Every rate carries its sample size and a Wilson 95% interval. The gate hard-fails on any
+unapproved write, PII leak or hallucinated citation, and compares everything else with an
+owner-approved baseline. It never writes that baseline itself, and it fails if the baseline
+is missing or was edited.
+
+Datasets, the harness and CI come in steps (p) and (q). **No eval numbers exist yet:
+`TBD (run make eval)`.**
+
 ## Asking questions
 
 ```bash
