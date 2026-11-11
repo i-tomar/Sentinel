@@ -118,6 +118,9 @@ class ApprovalStore:
             )
         return cursor.rowcount
 
+    def close(self) -> None:
+        self._conn.close()
+
     # --- reads -------------------------------------------------------------------------
 
     def get(self, approval_id: str) -> Approval | None:
