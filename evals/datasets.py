@@ -30,8 +30,10 @@ class Manifest(BaseModel):
 
 
 def file_hashes(directory: Path = DATASETS_DIR) -> dict[str, str]:
+    """sha256 of each file with line endings normalized to LF, so a checkout that converts
+    line endings (e.g. git autocrlf on Windows) does not look like an edit."""
     return {
-        p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+        p.name: hashlib.sha256(p.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
         for p in sorted(directory.glob("*.jsonl"))
     }
 
@@ -39,7 +41,9 @@ def file_hashes(directory: Path = DATASETS_DIR) -> dict[str, str]:
 def write_manifest(version: str, directory: Path = DATASETS_DIR) -> Manifest:
     """Owner step after editing a dataset: bump the version and record the new hashes."""
     manifest = Manifest(version=version, files=file_hashes(directory))
-    (directory / MANIFEST).write_text(manifest.model_dump_json(indent=2) + "\n", encoding="utf-8")
+    (directory / MANIFEST).write_text(
+        manifest.model_dump_json(indent=2) + "\n", encoding="utf-8", newline="\n"
+    )
     return manifest
 
 
