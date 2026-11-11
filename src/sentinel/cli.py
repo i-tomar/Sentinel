@@ -35,7 +35,7 @@ from sentinel.live.notion import API as NOTION_API
 from sentinel.live.notion import NOTION_VERSION
 from sentinel.live.smoke import SmokeReport, describe, smoke
 from sentinel.llm import make_chat_model
-from sentinel.mcp_clients.pool import active_sources, open_clients
+from sentinel.mcp_clients.pool import active_sources, open_available_clients, open_clients
 from sentinel.memory.backend import MemoryBackend
 from sentinel.memory.models import MemoryItem
 from sentinel.memory.policy import make_memory_backend
@@ -117,8 +117,10 @@ def ingest(source: SourceOption = None) -> None:
     with _open_store() as store:
 
         async def run() -> list[SourceReport]:
-            async with open_clients(settings, sources) as clients:
-                return await ingest_sources(clients, store, max_records=cap)
+            async with open_available_clients(settings, sources) as (clients, down):
+                reports = await ingest_sources(clients, store, max_records=cap)
+            failed = [SourceReport(source=s, error=reason) for s, reason in down.items()]
+            return sorted([*reports, *failed], key=lambda r: sources.index(r.source))
 
         reports = anyio.run(run)
         for r in reports:
@@ -309,6 +311,7 @@ def _agent_deps(
         k=k,
         max_hops=settings.max_hops,
         tool_timeout_s=settings.tool_timeout_s,
+        tool_budget_s=settings.tool_budget_s,
         memory=memory,
         data_mode=settings.data_mode,
         memory_auto_approve=auto_approve,
@@ -346,8 +349,8 @@ async def _tool_access(
     if not enabled:
         yield
         return
-    async with open_clients(settings, sources) as clients:
-        deps.tools = MCPToolExecutor(clients, settings.tool_timeout_s)
+    async with open_available_clients(settings, sources) as (clients, down):
+        deps.tools = MCPToolExecutor(clients, settings.tool_timeout_s, unavailable=down)
         yield
 
 
@@ -442,6 +445,14 @@ def approve(
     if outcome.status == "succeeded":
         typer.echo(f"done: {approval.source}.{approval.tool} {_fields(outcome.result or {})}")
         return
+    if outcome.status == "uncertain":
+        typer.echo(
+            f"uncertain: {approval.source}.{approval.tool} was sent but its outcome is unknown "
+            f"({outcome.reason}). It may or may not have happened: check the record before "
+            "requesting a new approval. It was not retried.",
+            err=True,
+        )
+        raise typer.Exit(1)
     typer.echo(f"{outcome.status}: {approval.source}.{approval.tool} ({outcome.reason})", err=True)
     raise typer.Exit(1)
 
@@ -471,8 +482,8 @@ async def _run_approved(
         and policy.evaluate(action, settings.data_mode).verdict == "require_approval"
     ):
         source: Source = next(s for s in SOURCES if s == approval.source)
-        async with open_clients(settings, [source]) as clients:
-            runner.clients = {str(k): v for k, v in clients.items()}
+        async with open_available_clients(settings, [source]) as (clients, _):
+            runner.clients = {str(k): v for k, v in clients.items()}  # none if it failed
             return await runner.execute(approval.id, session=session, principal=principal)
     return await runner.execute(approval.id, session=session, principal=principal)
 

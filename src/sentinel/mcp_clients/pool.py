@@ -92,23 +92,48 @@ def active_sources(settings: Settings, requested: Sequence[Source]) -> list[Sour
     return [s for s in requested if s in settings.live_sources]
 
 
-@asynccontextmanager
-async def open_clients(
-    settings: Settings, sources: Sequence[Source]
-) -> AsyncIterator[dict[Source, Client]]:
+def _chosen(settings: Settings, sources: Sequence[Source]) -> list[Source]:
     chosen = active_sources(settings, sources)
     if settings.data_mode == "live":
         missing = {s: m for s, m in settings.live_missing().items() if m and s in chosen}
         if missing:
             listed = "; ".join(f"{s}: {', '.join(m)}" for s, m in missing.items())
             raise LiveConfigError(f"live sources are not configured ({listed})")
+    return chosen
+
+
+def _params(settings: Settings, source: Source) -> StdioServerParameters:
+    if settings.data_mode == "live":
+        return live_server_params(source, settings)
+    return fixture_server_params(source, settings.fixture_state_dir)
+
+
+@asynccontextmanager
+async def open_clients(
+    settings: Settings, sources: Sequence[Source]
+) -> AsyncIterator[dict[Source, Client]]:
+    """Start every server; any failure to start raises (for commands that need them all)."""
+    chosen = _chosen(settings, sources)
     async with AsyncExitStack() as stack:
         clients: dict[Source, Client] = {}
         for source in chosen:
-            params = (
-                live_server_params(source, settings)
-                if settings.data_mode == "live"
-                else fixture_server_params(source, settings.fixture_state_dir)
-            )
-            clients[source] = await stack.enter_async_context(Client(params))
+            clients[source] = await stack.enter_async_context(Client(_params(settings, source)))
         yield clients
+
+
+@asynccontextmanager
+async def open_available_clients(
+    settings: Settings, sources: Sequence[Source]
+) -> AsyncIterator[tuple[dict[Source, Client], dict[Source, str]]]:
+    """Start each server independently. One that fails to start (crashes, exits, cannot be
+    launched) makes only its source unavailable: yields (clients, {source: reason})."""
+    chosen = _chosen(settings, sources)
+    async with AsyncExitStack() as stack:
+        clients: dict[Source, Client] = {}
+        down: dict[Source, str] = {}
+        for source in chosen:
+            try:
+                clients[source] = await stack.enter_async_context(Client(_params(settings, source)))
+            except Exception:
+                down[source] = "unavailable (failed to start)"
+        yield clients, down

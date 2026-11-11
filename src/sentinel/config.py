@@ -40,6 +40,8 @@ class Settings(BaseSettings):
     data_mode: DataMode = "fixture"
     max_hops: int = Field(default=4, ge=1, le=16)
     tool_timeout_s: float = Field(default=10.0, gt=0, le=300)
+    tool_budget_s: float = Field(default=60.0, gt=0, le=3600)
+    """Wall-clock budget for all tool calls in one turn; no call starts after it runs out."""
 
     # Storage. Local URLs use 127.0.0.1, not localhost: compose binds IPv4 only, and on Windows
     # localhost tries ::1 first, adding ~2 s to every request.

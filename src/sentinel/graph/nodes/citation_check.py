@@ -12,13 +12,25 @@ import re
 from collections.abc import Sequence
 
 from sentinel.citations import Citation, cited_numbers
-from sentinel.graph.nodes.answerer import is_insufficient
-from sentinel.graph.state import CitationReport, Evidence, UnsupportedClaim
+from sentinel.graph.nodes.answerer import failure_reasons, is_insufficient
+from sentinel.graph.state import CitationReport, Evidence, ToolFailure, UnsupportedClaim
 from sentinel.llm import INSUFFICIENT_PREFIX, PARTIAL_PREFIX
 from sentinel.memory.freshness import support as memory_support
 from sentinel.text import content_tokens, split_sentences
 
 SUPPORT_THRESHOLD = 0.5
+
+
+def ensure_failure_note(answer: str, failures: Sequence[ToolFailure]) -> str:
+    """Make sure an answer built while some sources failed says so, whatever the model wrote
+    (or whatever the citation check left of it). Answers that already name the failed
+    sources are left unchanged."""
+    if not failures or PARTIAL_PREFIX in answer or "could not be read" in answer:
+        return answer
+    listed = ", ".join(f"{s} ({r})" for s, r in failure_reasons(failures).items())
+    return f"{answer.rstrip()} {PARTIAL_PREFIX} {listed}, so this may be incomplete."
+
+
 _MARKER = re.compile(r"\[(\d{1,3})\]")
 _LEADING_MARKERS = re.compile(r"^((?:\s*\[\d{1,3}\])+)\s*")
 

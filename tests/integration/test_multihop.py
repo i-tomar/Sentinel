@@ -167,9 +167,9 @@ async def test_failing_source_is_retried_then_reported(
     result = await ask_async(THREE_HOP, deps, as_of=NOW)
 
     gmail_failures = [f for f in result.failures if f.source == "gmail"]
-    assert gmail_failures
-    assert all(f.attempts == 3 for f in gmail_failures)
-    assert all("500" in f.error for f in gmail_failures)
+    first, *rest = gmail_failures
+    assert (first.kind, first.attempts) == ("server_error", 3)  # retried, then...
+    assert all((f.kind, f.attempts) == ("skipped", 0) for f in rest)  # ...not called again
     assert sleeps.waits[:2] == [0.5, 1.0]  # exponential backoff between attempts
     assert set(result.evidence_keys) >= BLOCKED_TICKETS  # other sources still answered
     assert not {k for k in result.evidence_keys if k.startswith("gmail:")}
@@ -189,9 +189,9 @@ async def test_timeout_is_bounded(
     started = time.monotonic()
     result = await ask_async(THREE_HOP, deps, as_of=NOW)
     assert time.monotonic() - started < 15
-    gmail_failures = [f for f in result.failures if f.source == "gmail"]
-    assert gmail_failures
-    assert all(f.error == "timed out after 0.2s" and f.attempts == 2 for f in gmail_failures)
+    first, *rest = [f for f in result.failures if f.source == "gmail"]
+    assert (first.error, first.attempts) == ("timed out after 0.2s", 2)
+    assert all(f.kind == "skipped" for f in rest)
 
 
 # --- untrusted data cannot steer tools ------------------------------------------------------

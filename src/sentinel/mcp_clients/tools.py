@@ -12,10 +12,13 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
-from mcp import Client
-from mcp.types import TextContent
+from mcp import Client, MCPError
+from mcp.types import REQUEST_TIMEOUT, TextContent
 from pydantic import BaseModel
 
+from sentinel.mcp_clients.failures import RETRYABLE as RETRYABLE  # re-exported
+from sentinel.mcp_clients.failures import FailureKind
+from sentinel.mcp_clients.failures import classify_error as classify_error  # re-exported
 from sentinel.mcp_clients.registry import READ_TOOLS as READ_TOOLS  # re-exported
 from sentinel.mcp_clients.registry import spec_by_name
 from sentinel.permissions.actions import Action, Grant, PermissionDenied
@@ -24,7 +27,12 @@ from sentinel.retrieval.normalize import gmail_document, jira_document, notion_d
 
 
 class ToolCallError(RuntimeError):
-    pass
+    """A tool call that did not produce usable JSON. `kind` is a `FailureKind`; the message
+    may contain server text and must never be shown, stored or prompted (use `describe`)."""
+
+    def __init__(self, message: str, kind: FailureKind = "tool_error") -> None:
+        super().__init__(message)
+        self.kind: FailureKind = kind
 
 
 class SourceTools(BaseModel):
@@ -74,14 +82,21 @@ async def call_json(
     *,
     grant: Grant | None = None,
 ) -> Any:
-    """Call an MCP tool that returns JSON text. Tool errors and bad JSON raise ToolCallError;
-    calls the permission check refuses raise PermissionDenied."""
+    """Call an MCP tool that returns JSON text. Calls the permission check refuses raise
+    PermissionDenied; everything else that goes wrong (tool errors, bad JSON, timeouts, a
+    closed or crashed connection) raises a classified ToolCallError, never something else."""
     authorize(tool, args, grant)
-    result = await client.call_tool(tool, args, read_timeout_seconds=timeout_s)
+    try:
+        result = await client.call_tool(tool, args, read_timeout_seconds=timeout_s)
+    except MCPError as exc:
+        kind: FailureKind = "timeout" if exc.code == REQUEST_TIMEOUT else "unavailable"
+        raise ToolCallError(f"{tool}: {type(exc).__name__}", kind=kind) from None
+    except Exception as exc:
+        raise ToolCallError(f"{tool}: {type(exc).__name__}", kind="unavailable") from None
     text = "".join(b.text for b in result.content if isinstance(b, TextContent))
     if result.is_error:
-        raise ToolCallError(f"{tool} failed: {text}")
+        raise ToolCallError(f"{tool} failed: {text}", kind=classify_error(text))
     try:
         return json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise ToolCallError(f"{tool} returned malformed JSON") from exc
+    except json.JSONDecodeError:
+        raise ToolCallError(f"{tool} returned malformed JSON", kind="invalid_response") from None

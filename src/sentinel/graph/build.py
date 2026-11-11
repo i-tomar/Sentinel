@@ -43,8 +43,8 @@ from pydantic import BaseModel
 from sentinel.citations import Citation
 from sentinel.graph.conversation import context_from, prune_memory
 from sentinel.graph.nodes.answerer import build_messages, insufficient_answer, is_insufficient
-from sentinel.graph.nodes.citation_check import check_answer
-from sentinel.graph.nodes.execute_tools import ToolExecutor, execute_calls
+from sentinel.graph.nodes.citation_check import check_answer, ensure_failure_note
+from sentinel.graph.nodes.execute_tools import CallFailure, ToolExecutor, execute_calls
 from sentinel.graph.nodes.input_guard import blocked_answer, check_question
 from sentinel.graph.nodes.output_guard import guard_output
 from sentinel.graph.nodes.permission_gate import actions_from_question
@@ -90,6 +90,7 @@ from sentinel.guards.redaction import (
     redact_str,
 )
 from sentinel.guards.sanitize import GuardMode
+from sentinel.mcp_clients.failures import SOURCE_DOWN
 from sentinel.memory.backend import MemoryBackend
 from sentinel.memory.freshness import find_conflicts
 from sentinel.memory.models import MemoryItem, MemoryWrite
@@ -123,6 +124,8 @@ class Deps:
     max_hops: int = 4
     tool_timeout_s: float = 10.0
     tool_retries: int = 2
+    tool_budget_s: float = 60.0
+    """Wall-clock budget for all tool calls in one turn; no call starts after it runs out."""
     backoff_s: float = 0.5
     sleep: Callable[[float], Awaitable[None]] = anyio.sleep
     checkpointer: BaseCheckpointSaver[Any] | None = None
@@ -174,6 +177,8 @@ def build_graph(deps: Deps, raw_question: str | None = None) -> Any:
     """`raw_question` is the user's question as typed. It stays in this closure for the turn
     (input guard, write proposals) and is never written to state; `state.question` is the
     PII-redacted copy that planning, prompts, traces and both memories see."""
+
+    deadline = time.monotonic() + deps.tool_budget_s  # bounds tool work for this turn
 
     def traced(name: str, fn: Node) -> Node:
         async def run(state: AgentState) -> dict[str, Any]:
@@ -255,12 +260,14 @@ def build_graph(deps: Deps, raw_question: str | None = None) -> Any:
         if deps.tools is None or not state.pending_calls:
             return {"pending_calls": []}
 
-        def record(call: ToolCall, attempts: int, error: str | None) -> None:
+        def record(call: ToolCall, attempts: int, error: CallFailure | None) -> None:
             with deps.tracer.start_as_current_span("tool.call") as span:
                 span.set_attribute("sentinel.tool", f"{call.source}.{call.tool}")
                 set_text(span, "sentinel.tool.args", json.dumps(call.args, sort_keys=True))
                 span.set_attribute("sentinel.tool.attempts", attempts)
                 span.set_attribute("sentinel.tool.ok", error is None)
+                if error is not None:
+                    span.set_attribute("sentinel.tool.error_kind", error.kind)
 
         result = await execute_calls(
             state.pending_calls,
@@ -271,19 +278,20 @@ def build_graph(deps: Deps, raw_question: str | None = None) -> Any:
             backoff_s=deps.backoff_s,
             sleep=deps.sleep,
             on_call=record,
+            down={f.source for f in state.failures if f.kind in SOURCE_DOWN},
+            deadline=deadline,
         )
         sq_docs = dict(state.sq_docs)
         for sq_id, keys in result.sq_docs.items():
             sq_docs[sq_id] = list(dict.fromkeys([*sq_docs.get(sq_id, []), *keys]))
         # Records enter the state (and so every checkpoint) PII-redacted.
         redacted = {key: redact_document(doc) for key, doc in result.documents.items()}
-        failures = [f.model_copy(update={"error": redact_str(f.error)}) for f in result.failures]
         return {
             "pending_calls": [],
             "tool_calls": [*state.tool_calls, *state.pending_calls],
             "documents": {**state.documents, **redacted},
             "sq_docs": sq_docs,
-            "failures": [*state.failures, *failures],
+            "failures": [*state.failures, *result.failures],
         }
 
     async def retrieve(state: AgentState) -> dict[str, Any]:
@@ -371,6 +379,15 @@ def build_graph(deps: Deps, raw_question: str | None = None) -> Any:
         notes = flag_conflicts(
             state.memory_notes, {c.key: (c.reason, c.superseded_by) for c in conflicts}
         )
+        # A note whose source could not be read this turn was not re-checked: it counts as
+        # unverified, so the citation check removes any sentence that states it as fact.
+        failed = {f.source for f in state.failures}
+        notes = [
+            n.model_copy(update={"verified": False})
+            if n.source_record and n.source_record.split(":", 1)[0] in failed
+            else n
+            for n in notes
+        ]
         evidence = assemble_evidence(
             state.question,
             state.plan,
@@ -417,6 +434,7 @@ def build_graph(deps: Deps, raw_question: str | None = None) -> Any:
     async def citation_check(state: AgentState) -> dict[str, Any]:
         unverified = [n.value for n in state.memory_notes if not n.verified and not n.stale]
         final, used, report = check_answer(state.draft, state.evidence, unverified)
+        final = ensure_failure_note(final, state.failures)
         return {
             "answer": final,
             "citations": used,

@@ -7,24 +7,50 @@ harness can change behaviour per case without restarting servers:
 
 Targets are `<source>.<tool>`, `<source>`, or `*`; the most specific match wins.
 `SENTINEL_FIXTURE_TIMEOUT_S` (default 30) is how long `timeout` stalls before giving up.
+
+Modes: `timeout`, `error_500`, `rate_limit`, `empty`, `malformed` (truncated JSON),
+`invalid_schema` (valid JSON of the wrong shape), and `crash` (the server process exits in
+the middle of the call). `crash` only works in a server subprocess (the servers' `__main__`
+enables it); in-process it raises a tool error instead, so it can never kill a test runner.
+The rule `<source>.startup=crash` makes that server exit before it starts serving.
 """
 
 from __future__ import annotations
 
 import os
+import sys
 from collections.abc import Mapping
 from typing import Literal, TypeGuard, get_args
 
 import anyio
 from mcp.server.mcpserver.exceptions import ToolError
 
-FailureMode = Literal["timeout", "error_500", "empty", "malformed", "rate_limit"]
+FailureMode = Literal[
+    "timeout", "error_500", "empty", "malformed", "rate_limit", "invalid_schema", "crash"
+]
 FAILURE_MODES: frozenset[str] = frozenset(get_args(FailureMode))
 
 FAILURES_ENV = "SENTINEL_FIXTURE_FAILURES"
 TIMEOUT_ENV = "SENTINEL_FIXTURE_TIMEOUT_S"
 DEFAULT_TIMEOUT_S = 30.0
 MALFORMED_PAYLOAD = '{"results": [{"id": "trunc'
+INVALID_SCHEMA_PAYLOAD = '{"results": [{"unexpected": "shape"}], "total": "many"}'
+CRASH_EXIT_CODE = 70
+_crash_allowed = False
+
+
+def allow_crash() -> None:
+    """Called by a server's `__main__`: from now on `crash` really exits the process."""
+    global _crash_allowed
+    _crash_allowed = True
+
+
+def exit_if_startup_fails(source: str, env: Mapping[str, str] | None = None) -> None:
+    """Honour `<source>.startup=crash` (exact target only): exit before serving anything."""
+    env = os.environ if env is None else env
+    if parse_spec(env.get(FAILURES_ENV, "")).get(f"{source}.startup") == "crash":
+        print(f"{source} fixture server: simulated startup failure", file=sys.stderr)
+        sys.exit(CRASH_EXIT_CODE)
 
 
 def parse_spec(spec: str) -> dict[str, FailureMode]:
@@ -76,4 +102,10 @@ async def apply(source: str, tool: str, *, empty: str) -> str | None:
         raise ToolError(f"429 Too Many Requests from {source} API; retry after 1s")
     if mode == "empty":
         return empty
+    if mode == "invalid_schema":
+        return INVALID_SCHEMA_PAYLOAD
+    if mode == "crash":
+        if _crash_allowed:
+            os._exit(CRASH_EXIT_CODE)  # no cleanup, no reply: like a real crash
+        raise ToolError(f"{source} crash mode needs a server subprocess")
     return MALFORMED_PAYLOAD
