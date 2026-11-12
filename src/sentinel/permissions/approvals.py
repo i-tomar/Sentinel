@@ -100,7 +100,7 @@ class ApprovalStore:
             str(path), check_same_thread=False, isolation_level=None, timeout=10.0
         )
         # SQLite overwrites deleted/cleared content with zeros instead of leaving it in free
-        # pages. This is hygiene, not secure erasure (see the README's retention notes).
+        # pages. This is hygiene, not secure erasure (see docs/architecture.md, retention).
         self._conn.execute("PRAGMA secure_delete = ON")
         self._conn.execute(_SCHEMA)
         self._lock = threading.Lock()
