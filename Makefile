@@ -88,11 +88,11 @@ deny: ## Deny one proposed write: make deny A=<approval id> S=<session id>
 serve: ## FastAPI on :8000                               [step l]
 	@echo "not implemented yet: lands in Phase 3 step l" && exit 1
 
-eval: ## Eval suite (mock LLM, fixtures) -> reports/metrics.json + report.md; exit 1 if the gate fails
-	$(UV) run python -m evals.run
+eval: ## Full eval suite (mock LLM, fixtures, offline) -> reports/; exit 1 if the gate fails
+	$(UV) run python -m evals.run $(EVAL_ARGS)
 
-eval-fast: ## Deterministic eval subset (< 3 min)        [step p]
-	@echo "not implemented yet: lands in Phase 4 step p" && exit 1
+eval-fast: ## Deterministic eval subset (mock LLM, offline, ~1 min) -> reports/
+	$(UV) run python -m evals.run --fast $(EVAL_ARGS)
 
 baseline: ## Copy metrics -> evals/baseline.json (owner approval required) [step r]
 	@echo "not implemented yet: lands in Phase 4 step r" && exit 1

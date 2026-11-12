@@ -164,12 +164,14 @@ def render_markdown(report: dict[str, Any], gate: GateResult) -> str:
             if meta["model"] == "mock"
             else ""
         ),
-        f"- Dataset version: {meta['dataset_version']} ({meta['cases']} cases)",
+        f"- Dataset version: {meta['dataset_version']} ({meta['cases']} cases, "
+        f"subset: {meta.get('subset', 'all')})",
         f"- Commit: {meta.get('commit') or 'unknown'}; run at {meta['started_at']}",
         f"- Judge: {'on' if meta.get('judge') else 'off (judge-only cases are unscored)'}",
         "- Splits: `dev` may reuse fixture payloads, detector samples or rule wording; "
         "`heldout` was written independently of both and was never used to tune the guards.",
         "",
+        *([f"> **{meta['baseline_note']}**", ""] if meta.get("baseline_note") else []),
         "## Metrics",
         "",
         "| Metric | all | dev | heldout |",
