@@ -83,7 +83,7 @@ def test_a_degraded_run_turns_the_gate_red(
     assert exit_code(gate, [_ok()], baseline_advisory=True) == 1  # fails CI even in advisory
 
 
-# --- the temporary missing-baseline policy ------------------------------------------------
+# --- the advisory flag (real-model workflow only; the every-PR job no longer uses it) ------
 
 
 def test_missing_baseline_is_a_gate_failure_but_advisory_in_ci(tmp_path: Path) -> None:
@@ -94,7 +94,7 @@ def test_missing_baseline_is_a_gate_failure_but_advisory_in_ci(tmp_path: Path) -
     note = baseline_note(gate, advisory=True)
     assert note is not None
     assert "no baseline" in note
-    assert "step (r)" in note
+    assert "baseline problem alone" in note
     assert baseline_note(gate, advisory=False) is not None
 
 
@@ -211,7 +211,7 @@ def test_ci_runs_eval_fast_with_no_secrets() -> None:
     assert {"lint", "test", "eval-fast"} <= set(jobs)
     steps = _steps(jobs["eval-fast"])
     assert "make eval-fast" in steps
-    assert "--baseline-advisory" in steps
+    assert "--baseline-advisory" not in steps
     assert "GITHUB_STEP_SUMMARY" in steps
     assert "actions/upload-artifact" in steps
     assert "secrets." not in raw
@@ -230,3 +230,4 @@ def test_full_eval_workflow_triggers_and_skips_without_a_secret() -> None:
     assert "actions/cache" in raw  # judge results cached by hash
     assert "GITHUB_STEP_SUMMARY" in raw
     assert "actions/upload-artifact" in raw
+    assert "--baseline-advisory" in raw  # no real-model baseline is approved yet

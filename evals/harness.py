@@ -58,9 +58,11 @@ class HarnessConfig:
     tokens_reported: bool = False
     """False for the mock (it reports no real token counts): tokens are left None."""
     model_name: str = "mock"
-    tool_timeout_s: float = 0.5
-    fixture_timeout_s: float = 2.0
-    """How long the fixture `timeout` failure mode stalls (kept short for evals)."""
+    tool_timeout_s: float = 2.0
+    """Generous for in-process calls (milliseconds locally) so a slow CI runner never turns a
+    healthy call into a timeout and changes a deterministic metric."""
+    fixture_timeout_s: float = 5.0
+    """How long the fixture `timeout` failure mode stalls: well past `tool_timeout_s`."""
 
 
 def corpus_keys(cases: Sequence[EvalCase], dataset: FixtureDataset | None = None) -> set[str]:

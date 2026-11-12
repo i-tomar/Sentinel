@@ -55,13 +55,11 @@ jobs:
           enable-cache: true
       - run: uv sync --locked --all-extras
       - name: Eval (fast subset, mock LLM)
-        # --baseline-advisory is temporary: until an owner approves
-        # evals/baselines/mock-fast.json (step r), a missing, unreadable, unapproved or edited
-        # baseline is reported at the top of the job summary but does not fail this required
-        # check. The gate still counts it as a failure. Hard rules (unapproved writes, PII
-        # leaks, hallucinated citations), threshold regressions against an approved baseline,
-        # and cases that cannot run always fail it.
-        run: make eval-fast EVAL_ARGS=--baseline-advisory
+        # evals/baselines/mock-fast.json is approved. A missing, unreadable, unapproved or
+        # edited baseline fails this required check, as do hard rules (unapproved writes, PII
+        # leaks, hallucinated citations), threshold regressions and cases that cannot run.
+        # The mock baseline omits latency; mean tool calls stay gated.
+        run: make eval-fast
       - name: Job summary (mock LLM)
         if: always()
         run: |
