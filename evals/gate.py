@@ -104,7 +104,7 @@ def approve_baseline(
     metrics: Mapping[str, Value], path: Path, *, approved_by: str, note: str = ""
 ) -> Baseline:
     """The explicit owner step: write `metrics` as the new baseline, signed off by name.
-    Never called by the gate (step r wires it to `make baseline` behind owner approval)."""
+    Never called by the gate. The owner calls it and the resulting file is committed."""
     if not approved_by.strip():
         raise ValueError("approved_by must name the owner who approves this baseline")
     baseline = Baseline(

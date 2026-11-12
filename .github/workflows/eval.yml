@@ -77,9 +77,9 @@ jobs:
 
       - name: Eval (full suite, real model)
         if: steps.secret.outputs.available == 'true'
-        # --baseline-advisory: until an owner approves a baseline for this model (step r), a
-        # missing or invalid baseline is reported but does not fail the job. Hard rules
-        # (unapproved writes, PII leaks, hallucinated citations) always fail it.
+        # --baseline-advisory stays until an owner approves a baseline for this model. The
+        # mock baselines do not apply to a real-model run. A missing or invalid baseline is
+        # reported but does not fail the job. Hard rules always fail it.
         run: >-
           uv run python -m evals.run --llm configured --baseline-advisory
           ${{ (github.event_name != 'workflow_dispatch' || inputs.judge) && '--judge' || '' }}

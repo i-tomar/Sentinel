@@ -8,7 +8,8 @@ optional eval.yml workflow), plus `--judge` for the cached LLM judge.
 
 Exit code 1 when a case cannot run or the gate fails (including "no baseline"). Two escape
 hatches: `--report-only` (always 0) and `--baseline-advisory` (a baseline problem alone does
-not fail; used by CI until an owner approves a baseline in step r).
+not fail). The every-PR job no longer uses that flag. The real-model workflow still does,
+because no real-model baseline is approved.
 """
 
 from __future__ import annotations
@@ -87,17 +88,17 @@ def baseline_note(gate: GateResult, *, advisory: bool) -> str | None:
         return None
     if advisory:
         return (
-            f"Baseline problem: {check.reason}. The gate reports this as a failure, but until "
-            "an owner approves a baseline (step (r)) it does not fail this CI check. Hard rules "
-            "(unapproved writes, PII leaks, hallucinated citations) still fail it."
+            f"Baseline problem: {check.reason}. The gate reports this as a failure, but "
+            "--baseline-advisory is set, so a baseline problem alone does not fail this run. "
+            "Hard rules (unapproved writes, PII leaks, hallucinated citations) still fail it."
         )
     return f"Baseline problem: {check.reason}. This fails the gate."
 
 
 def exit_code(gate: GateResult, results: Sequence[CaseResult], *, baseline_advisory: bool) -> int:
-    """1 if any case could not run, or any gate check failed. With `baseline_advisory` (the
-    every-PR CI job until step r) a failing *baseline* check alone does not cause exit 1; every
-    other failure, hard rules first, still does. The gate result itself is never changed."""
+    """1 if any case could not run, or any gate check failed. With `baseline_advisory` a
+    failing *baseline* check alone does not cause exit 1; every other failure, hard rules
+    first, still does. The gate result itself is never changed."""
     if any(r.harness_error for r in results):
         return 1
     failed = [c for c in gate.checks if c.status == "fail"]
@@ -128,8 +129,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--baseline-advisory",
         action="store_true",
-        help="A missing/invalid baseline is reported but does not fail the exit code (CI, "
-        "until step r). Hard rules and other gate failures still do.",
+        help="A missing/invalid baseline is reported but does not fail the exit code. "
+        "Hard rules and other gate failures still do. The real-model workflow uses this "
+        "until a baseline for that model is approved.",
     )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.WARNING)

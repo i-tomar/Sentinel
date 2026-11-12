@@ -732,7 +732,9 @@ and are unit-tested on small hand-made results. Their definitions are in
 Every rate carries its sample size and a Wilson 95% interval. The gate hard-fails on any
 unapproved write, PII leak or hallucinated citation, and compares everything else with an
 owner-approved baseline. It never writes that baseline itself, and it fails if the baseline
-is missing or was edited.
+is missing or was edited. Mock baselines omit latency, because it is not deterministic
+across machines, and include mean tool calls, which stay gated. A baseline that records
+latency is still compared at +25%.
 
 ## Eval datasets and harness (step p)
 
@@ -749,7 +751,9 @@ uv run python -m evals.run --llm configured  # opt-in real model (LLM_PROVIDER/M
 - **The harness.** It runs every case through the real agent graph on in-process fixture
   servers with the mock LLM. It writes `reports/report.md` and `reports/metrics.json` with
   sample sizes and 95% intervals, separately for `all`, `dev` and `heldout`, and runs the
-  gate. It never writes a baseline, and it exits 1 while none is approved.
+  gate. It never writes a baseline. With the approved mock baselines it exits 0 when the
+  gate passes, and exits 1 on a hard-rule breach, a regression past a threshold, a baseline
+  problem, or a case that cannot run.
 - **Which split numbers come from:**
   - `dev` may reuse the fixture payloads and the detector's samples or rule wording.
   - `heldout` (attack and benign cases) was written independently of both, and the guards
@@ -769,17 +773,16 @@ uv run python -m evals.run --llm configured  # opt-in real model (LLM_PROVIDER/M
 - **Every PR, no secrets.** `ci.yml` runs lint, mypy and the offline tests as before, plus
   `eval-fast`: a 52-case mock-LLM subset (`make eval-fast`) with the network refused. It
   writes the report to the job summary (labelled mock-LLM) and uploads `reports/` as an
-  artifact. Hard rules (unapproved write, PII leak, hallucinated citation), threshold
-  regressions and cases that can't run fail the job.
+  artifact. It checks the approved mock baseline `evals/baselines/mock-fast.json`. Hard
+  rules (unapproved write, PII leak, hallucinated citation), a regression past a threshold,
+  a baseline problem, and cases that can't run fail the job.
 - **Optional real-model run.** `eval.yml` is triggered by the `run-evals` PR label, nightly,
   or manually. It needs the `LLM_API_KEY` secret plus the `LLM_PROVIDER` and `LLM_MODEL`
   variables, and reports "skipped" and succeeds without them. LLM-judge verdicts are cached
-  by hash. No secret is configured and no real model has run.
-- **Missing baseline: temporary policy.** Until an owner approves a baseline in step (r),
-  CI passes `--baseline-advisory`. A missing, unreadable, unapproved or edited baseline is
-  shown in a banner at the top of the job summary and doesn't fail the PR check. The gate
-  itself still reports it as a failure, and local `make eval` / `make eval-fast` still exit
-  1. Details: [docs/eval-design.md](docs/eval-design.md#ci-step-q).
+  by hash. No secret is configured and no real model has run. That workflow still passes
+  `--baseline-advisory`, because no real-model baseline is approved. A missing baseline is
+  reported and does not fail that optional job. Hard rules still do. Details:
+  [docs/eval-design.md](docs/eval-design.md#ci-step-q).
 
 ## Asking questions
 
