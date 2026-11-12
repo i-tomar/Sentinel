@@ -42,3 +42,38 @@ jobs:
       - name: Fixture data is up to date
         run: uv run python -m servers.fixtures.generate --check
       - run: uv run pytest
+
+  eval-fast:
+    # Deterministic eval subset: mock LLM, in-process fixture servers, temporary stores.
+    # The run itself refuses public network connections; only `uv sync` downloads packages.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          enable-cache: true
+      - run: uv sync --locked --all-extras
+      - name: Eval (fast subset, mock LLM)
+        # --baseline-advisory is temporary: until an owner approves
+        # evals/baselines/mock-fast.json (step r), a missing, unreadable, unapproved or edited
+        # baseline is reported at the top of the job summary but does not fail this required
+        # check. The gate still counts it as a failure. Hard rules (unapproved writes, PII
+        # leaks, hallucinated citations), threshold regressions against an approved baseline,
+        # and cases that cannot run always fail it.
+        run: make eval-fast EVAL_ARGS=--baseline-advisory
+      - name: Job summary (mock LLM)
+        if: always()
+        run: |
+          if [ -f reports/report.md ]; then
+            cat reports/report.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### The eval did not produce a report" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@v7.0.2
+        if: always()
+        with:
+          name: eval-fast-reports
+          path: reports/
+          if-no-files-found: warn
+          retention-days: 14

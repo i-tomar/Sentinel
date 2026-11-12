@@ -1,0 +1,102 @@
+name: eval (real model)
+
+# Full eval suite against a real model: opt-in only.
+# - Triggers: the `run-evals` label on a PR, nightly, or manually (Actions > eval > Run).
+# - Needs the repository secret LLM_API_KEY and the repository variables LLM_PROVIDER and
+#   LLM_MODEL. Without the secret (not configured, or a fork PR, which never gets secrets)
+#   the job writes "skipped" to the summary and succeeds: nothing runs, nothing fails.
+# - Fixture data only (DATA_MODE=fixture): the model is real, the workspace data is not.
+on:
+  pull_request:
+    types: [labeled, synchronize, reopened]
+  schedule:
+    - cron: "17 2 * * *" # nightly, 02:17 UTC
+  workflow_dispatch:
+    inputs:
+      judge:
+        description: Score rubric cases with the (cached) LLM judge
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: eval-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  eval:
+    if: >-
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'run-evals')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      DATA_MODE: fixture
+      TRACING_BACKEND: none
+      LLM_PROVIDER: ${{ vars.LLM_PROVIDER || 'openai' }}
+      LLM_MODEL: ${{ vars.LLM_MODEL }}
+      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+    steps:
+      - name: Check for the model secret
+        id: secret
+        run: |
+          if [ -z "${LLM_API_KEY}" ]; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Real-model eval skipped"
+              echo
+              echo "The LLM_API_KEY secret is not configured (or is not available to this"
+              echo "event, e.g. a pull request from a fork). Nothing ran; this is not a failure."
+            } >> "$GITHUB_STEP_SUMMARY"
+          elif [ -z "${LLM_MODEL}" ]; then
+            echo "::error::LLM_API_KEY is set but the LLM_MODEL repository variable is not."
+            exit 1
+          else
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v7.0.1
+        if: steps.secret.outputs.available == 'true'
+      - uses: astral-sh/setup-uv@v10.3.3
+        if: steps.secret.outputs.available == 'true'
+        with:
+          enable-cache: true
+      - if: steps.secret.outputs.available == 'true'
+        run: uv sync --locked --all-extras
+
+      - name: Restore the LLM-judge cache (verdicts keyed by hash)
+        if: steps.secret.outputs.available == 'true'
+        uses: actions/cache@v6.1.0
+        with:
+          path: .cache/eval-judge
+          key: eval-judge-${{ env.LLM_PROVIDER }}-${{ env.LLM_MODEL }}-${{ hashFiles('evals/datasets/manifest.json', 'evals/judge.py') }}
+          restore-keys: |
+            eval-judge-${{ env.LLM_PROVIDER }}-${{ env.LLM_MODEL }}-
+
+      - name: Eval (full suite, real model)
+        if: steps.secret.outputs.available == 'true'
+        # --baseline-advisory: until an owner approves a baseline for this model (step r), a
+        # missing or invalid baseline is reported but does not fail the job. Hard rules
+        # (unapproved writes, PII leaks, hallucinated citations) always fail it.
+        run: >-
+          uv run python -m evals.run --llm configured --baseline-advisory
+          ${{ (github.event_name != 'workflow_dispatch' || inputs.judge) && '--judge' || '' }}
+
+      - name: Job summary
+        if: always() && steps.secret.outputs.available == 'true'
+        run: |
+          if [ -f reports/report.md ]; then
+            cat reports/report.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### The eval did not produce a report" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - uses: actions/upload-artifact@v7.0.2
+        if: always() && steps.secret.outputs.available == 'true'
+        with:
+          name: eval-reports-${{ github.run_id }}
+          path: reports/
+          if-no-files-found: warn
+          retention-days: 30
