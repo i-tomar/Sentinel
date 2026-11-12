@@ -170,6 +170,27 @@ def test_a_metric_that_disappears_fails(tmp_path: Path) -> None:
     assert not result.passed
 
 
+def test_latency_left_out_of_a_baseline_is_not_gated(tmp_path: Path) -> None:
+    """Mock baselines omit latency. A slow run must not fail just because the baseline has
+    no latency_p95_ms. When both sides record it, the +25% check still applies (see
+    test_thresholds)."""
+    without_latency = {k: v for k, v in GOOD.items() if not str(k).startswith("latency_")}
+    result = evaluate_gate(_run(latency_p95_ms=5000), _approved(tmp_path, without_latency))
+    assert _check(result, "latency_p95_ms").status == "skip"
+    assert result.passed
+    assert next(t for t in DEFAULT_THRESHOLDS if t.metric == "latency_p95_ms").optional
+
+
+def test_mean_tool_calls_stay_gated_when_both_sides_report_them(tmp_path: Path) -> None:
+    baseline = _approved(tmp_path, _run(mean_tool_calls=2.0))
+    within = evaluate_gate(_run(mean_tool_calls=2.4), baseline)  # +20%, tolerance +25%
+    assert _check(within, "mean_tool_calls").status == "pass"
+    assert within.passed
+    worse = evaluate_gate(_run(mean_tool_calls=2.6), baseline)  # +30%
+    assert _check(worse, "mean_tool_calls").status == "fail"
+    assert not worse.passed
+
+
 def test_tokens_are_compared_only_when_both_runs_report_them(tmp_path: Path) -> None:
     result = evaluate_gate(_run(tokens_mean_total=900.0), _approved(tmp_path))
     assert _check(result, "tokens_mean_total").status == "skip"
