@@ -1,7 +1,7 @@
 # Eval design: metrics and the regression gate
 
-Status: step (p). The metrics and gate (step o), the versioned datasets, the harness and the
-report exist. CI wiring is step (q), and the baseline is step (r). **No real-model numbers
+Status: step (q). The metrics and gate (step o), the datasets, harness and report (step p),
+and the CI wiring (step q) exist. Approving a baseline is step (r). **No real-model numbers
 exist yet.** The only runs so far use the deterministic mock LLM, which measures the pipeline
 and the guards, not a model.
 
@@ -91,6 +91,70 @@ answers.
   "retrieved attacks flagged" measure what the guards detect, independently of the model.
 - **Answer correctness is low for a known reason.** The mock often picks other sentences than
   the one holding the expected fact.
+
+## CI (step q)
+
+**Every PR and push to `main` (`.github/workflows/ci.yml`, no secrets).** `lint` and `test`
+are unchanged. The new `eval-fast` job:
+
+- runs `make eval-fast EVAL_ARGS=--baseline-advisory`;
+- covers the 52-case `FAST_CASES` subset (`evals/subsets.py`): every category and both splits,
+  all permission cases, PII, the main failure modes, a multi-hop and stale-record slice, and
+  attack and benign slices from dev and held-out;
+- uses the mock LLM and in-process fixture servers, with the run itself refusing public
+  network connections (`evals/offline.py`); only `uv sync` downloads packages;
+- takes about a minute locally;
+- writes `reports/report.md` to `$GITHUB_STEP_SUMMARY` and uploads `reports/` as the
+  `eval-fast-reports` artifact.
+
+The summary is labelled mock-LLM in its first lines.
+
+**Optional real-model eval (`.github/workflows/eval.yml`):**
+
+- **Triggers:** the `run-evals` label on a PR (re-runs on new commits while it's applied), a
+  nightly schedule (02:17 UTC), or manually through Actions > eval > Run workflow.
+- **Configuration:** needs the repository secret `LLM_API_KEY` and the variables
+  `LLM_PROVIDER` and `LLM_MODEL`. If the secret isn't available (not configured, or a PR from
+  a fork, which never gets secrets), the first step writes "Real-model eval skipped" to the
+  summary and every later step is skipped. The job succeeds.
+- **What runs:** the full suite with `--llm configured`, and `--judge` on schedule and label
+  runs (optional on manual runs).
+- **Judge cache:** judge verdicts are cached by hash (`evals/judge.py`). `actions/cache`
+  restores `.cache/eval-judge`, keyed on the provider, the model and the hash of the dataset
+  manifest and judge code. Cache files hold verdicts only.
+- **Output:** the report goes to the job summary and `reports/` is uploaded.
+- **No secret exists yet** and no real model has been run.
+
+**How the gate is applied in CI.** `evals.run` computes the metrics, runs the gate unchanged,
+and derives its exit code with `exit_code()`:
+
+| Condition | Gate result | `make eval` / `make eval-fast` | CI (`--baseline-advisory`) |
+|---|---|---|---|
+| hard rule fails (unapproved write, PII leak, hallucinated citation) | fail | exit 1 | **exit 1** |
+| threshold regression against an approved baseline | fail | exit 1 | **exit 1** |
+| a case could not run (harness error) | n/a | exit 1 | **exit 1** |
+| baseline missing, unreadable, unapproved or edited | fail | exit 1 | exit 0, with a banner at the top of the job summary |
+
+The last row is the only exception, and it is **temporary**. No baseline is approved until
+step (r), and a required check that always fails would keep every PR red. The gate library
+is not weakened: a missing or invalid baseline is still a gate failure in `metrics.json`, in
+the report, and for local `make eval` runs. Step (r) removes `--baseline-advisory` from
+`ci.yml` once `evals/baselines/mock-fast.json` is approved.
+
+**Baselines are per model and per subset.** The default path is
+`evals/baselines/<model>-<subset>.json`: `mock-fast.json` for CI, `mock-all.json` for
+`make eval`, and `openai-<model>-all.json`-style names for real-model runs. Fast-subset and
+full-suite numbers aren't comparable, and neither are mock and real-model numbers. This
+replaces the single `evals/baseline.json` the brief sketched.
+
+**The gate can go red.** `tests/unit/test_eval_ci.py` approves a healthy metrics snapshot as
+a baseline, then shows that each of these fails the gate and the CI exit code, even in
+advisory mode:
+
+- answer accuracy 5 points lower;
+- a retrieved-attack block rate falling from 65% to 40% (what disabling `retrieved_guard`
+  would look like);
+- a PII leak, an unapproved write, or a hallucinated citation.
 
 ## What a case result is
 
