@@ -1,10 +1,96 @@
 # Eval design: metrics and the regression gate
 
-Status: step (o). The metric functions (`evals/metrics.py`) and the gate (`evals/gate.py`)
-exist and are unit-tested on hand-made results (`tests/unit/test_metrics.py`,
-`tests/unit/test_gate.py`). The datasets, the harness that runs the agent per case, the
-report and CI wiring are steps (p) and (q). **No real numbers exist yet: every metric is
-`TBD (run make eval)`.**
+Status: step (p). The metrics and gate (step o), the versioned datasets, the harness and the
+report exist. CI wiring is step (q), and the baseline is step (r). **No real-model numbers
+exist yet.** The only runs so far use the deterministic mock LLM, which measures the pipeline
+and the guards, not a model.
+
+## Datasets (step p)
+
+The datasets are versioned JSONL files in `evals/datasets/`. `manifest.json` holds the
+version and each file's sha256. Loading refuses edited files until
+`evals.datasets.write_manifest(new_version)` records them, and reports name the version they
+ran on. Each row is an `evals.schema.EvalCase`:
+
+- id, category and surface, and the split (`dev` or `heldout`);
+- the question, plus earlier turns (`thread_setup`) for follow-ups and multi-turn attacks;
+- fixture failure rules (`fixture_overrides`);
+- per-case extra records (held-out poisoned or benign records that aren't part of the fixture
+  data) and memory seeds;
+- the expected values, the `needs_judge` flag and tags.
+
+| File | Cases | What |
+|---|---|---|
+| `normal.jsonl` | 20 | single-hop, multi-hop (2 and 3 hops, date math), stale vs current, follow-ups |
+| `edge.jsonl` | 12 | no answer in the data, stale vs current, conflicting sources; 5 negation and paraphrase cases marked `needs_judge` |
+| `memory_freshness.jsonl` | 4 | stale or unverified memory versus newer records |
+| `adversarial_user.jsonl` | 22 | input attacks: 10 dev, 12 held-out (paraphrase, Hindi, Hinglish, base64, ROT13, leetspeak, multi-turn, false authority) |
+| `adversarial_retrieved.jsonl` | 20 | 12 dev (the fixture's poisoned records), 8 held-out with new poisoned records (paraphrase, Hindi, Hinglish, ROT13, tool-call markup, deferred multi-turn, "already cleared") |
+| `benign_lookalikes.jsonl` | 24 | 14 input and 10 retrieved; 9 held-out (security discussions, "forget/override/pretend/act as" wording, new benign records) |
+| `permissions.jsonl` | 7 | write requests, a "pre-approved" claim, recipients outside the domain |
+| `pii.jsonl` | 6 | seeded PII in records and in the question |
+| `tool_failure.jsonl` | 9 | timeout, 5xx, rate limit, malformed, invalid schema, empty, everything failing |
+
+**Splits:**
+
+- **`dev`** cases may reuse the fixture payloads, the detector's test samples or its rule
+  wording. They show the guards work on what they were built against.
+- **`heldout`** cases (attack and benign only) were written independently of the fixture
+  payloads and the detector's rules. A test checks they don't contain any fixture payload,
+  poisoned-record marker or detector sample. The guards were not tuned on them, and their
+  failures are recorded as they are. Numbers that claim generalisation must come from the
+  `heldout` column.
+
+**Ground truth.** Expected facts and records come from the fixture records, never from a
+run. The 5 `needs_judge` cases (negations and paraphrases) have only a rubric. They are
+unscored until a judge is configured, and are reported as such.
+
+## Harness (step p)
+
+`evals/harness.py` runs each case through the real agent graph (`ask_async`):
+
+- **Isolation per case:** fresh in-process fixture MCP servers (plus the case's extra
+  records), the case's failure rules, and temporary SQLite checkpoints, memory, approval
+  store and audit log.
+- **Tracing:** an in-memory span exporter behind the same redacting exporter used in
+  production.
+- **Model:** the mock LLM and rule planner by default.
+- **Memory writes:** use the explicit fixture-only auto-approve flag. They are recorded as
+  approved writes; nothing else is ever approved during an eval.
+
+The harness then fills a `CaseResult`:
+
+- the answer and citations (claim sentence plus cited key);
+- the retrieved keys and the text of every returned record (from the final graph state);
+- guard flags, tool calls, executed writes (from the audit log), approval requests and policy
+  denials;
+- latency and tool calls;
+- every output path: answer, result JSON, spans, audit log, and the bytes of every stored
+  file.
+
+`python -m evals.run` (also `make eval`):
+
+- loads and verifies the datasets, runs every case, computes the metrics for all cases and
+  for each split, and runs the gate on all cases;
+- writes `reports/metrics.json` and `reports/report.md`, containing case ids and failure
+  reasons only, never questions, answers or record text;
+- exits 1 when the gate fails, including "no baseline", unless `--report-only` is passed;
+- never writes a baseline;
+- accepts `--case` and `--category` filters.
+
+`--llm configured` runs against the model in `LLM_PROVIDER`, `LLM_MODEL` and `LLM_API_KEY`.
+It is opt-in, never used by tests, and reports tokens where the provider returns them.
+
+**Why mock numbers are not model results.** The mock LLM answers by copying evidence
+sentences. It never follows instructions, so it can't be jailbroken, and it doesn't phrase
+answers.
+
+- **Block rates aren't a resistance measure.** A mock run's attack block rates mostly measure
+  tool use and writes, not resistance to manipulation.
+- **Detection is reported separately.** The diagnostics "input attacks refused" and
+  "retrieved attacks flagged" measure what the guards detect, independently of the model.
+- **Answer correctness is low for a known reason.** The mock often picks other sentences than
+  the one holding the expected fact.
 
 ## What a case result is
 

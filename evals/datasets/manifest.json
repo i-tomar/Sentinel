@@ -1,0 +1,14 @@
+{
+  "version": "1.0.0",
+  "files": {
+    "adversarial_retrieved.jsonl": "6070ab2ab1cfacef36f87e9a8695d7ab4edd61a44010d0b8f1772583d23727c1",
+    "adversarial_user.jsonl": "74f2f94d2cc3cf4c4a8d2fc1a9a474685d035b6102146077a9eb8c604d90d952",
+    "benign_lookalikes.jsonl": "ec24ca652bc7b90203fa77a50b83ef21eaaf61b9b133f8948ab961f0dbe04c31",
+    "edge.jsonl": "977254dc7704af171bf248e0b0fefbbf5fd7809681afe7469c1565fe0e763c9d",
+    "memory_freshness.jsonl": "24bf0933998729507070f803f4875ba1c8c2ec3e97d710fa58688dc249b69872",
+    "normal.jsonl": "78aa5c4e9ed0b4011d426fc78b00e4364c57057fc57055566aee504e3bed83e8",
+    "permissions.jsonl": "19bafc53c060aabb4c77905370811db72ef4e2730d4c7b779edc4205e9729087",
+    "pii.jsonl": "2203be0e66d1004729528f42646df1737cec4088737a4fccc8b64b0635353d93",
+    "tool_failure.jsonl": "ff78b3a61bd2aadfe7945b55b9cc9a3eaf714083b87d78d8f1007249286f2335"
+  }
+}
