@@ -231,3 +231,20 @@ def test_full_eval_workflow_triggers_and_skips_without_a_secret() -> None:
     assert "GITHUB_STEP_SUMMARY" in raw
     assert "actions/upload-artifact" in raw
     assert "--baseline-advisory" in raw  # no real-model baseline is approved yet
+
+
+def test_full_eval_workflow_supports_groq_with_the_same_skip() -> None:
+    raw = (WORKFLOWS / "eval.yml").read_text(encoding="utf-8")
+    job = _workflow("eval.yml")["jobs"]["eval"]
+    env = job["env"]
+    assert env["LLM_API_KEY"] == "${{ secrets.LLM_API_KEY }}"  # one secret for every provider
+    assert "vars.LLM_PROVIDER" in env["LLM_PROVIDER"]  # set it to groq
+    assert env["LLM_JUDGE_MODEL"] == "${{ vars.LLM_JUDGE_MODEL }}"
+    assert "vars.EVAL_CASE_DELAY_S" in env["EVAL_CASE_DELAY_S"]
+    assert '--case-delay "${EVAL_CASE_DELAY_S}"' in raw  # via env, not template-expanded
+    assert "LLM_JUDGE_MODEL || env.LLM_MODEL" in raw  # judge cache keyed by the judge model
+    assert job["timeout-minutes"] >= 120
+    first = job["steps"][0]
+    assert first["id"] == "secret"
+    assert 'if [ -z "${LLM_API_KEY}" ]' in first["run"]  # skip without the secret, any provider
+    assert "groq" in raw

@@ -5,6 +5,10 @@ name: eval (real model)
 # - Needs the repository secret LLM_API_KEY and the repository variables LLM_PROVIDER and
 #   LLM_MODEL. Without the secret (not configured, or a fork PR, which never gets secrets)
 #   the job writes "skipped" to the summary and succeeds: nothing runs, nothing fails.
+# - Groq: LLM_PROVIDER=groq, LLM_MODEL=<a Groq model id>, LLM_API_KEY=<a Groq key>. Optional
+#   variables: LLM_JUDGE_MODEL (judge model, same provider and key) and EVAL_CASE_DELAY_S
+#   (pause between cases for free-tier per-minute limits). HTTP 429s are waited out and not
+#   counted as latency; a limit that cannot be waited out stops the run with a message.
 # - Fixture data only (DATA_MODE=fixture): the model is real, the workspace data is not.
 on:
   pull_request:
@@ -31,12 +35,14 @@ jobs:
       github.event_name != 'pull_request' ||
       contains(github.event.pull_request.labels.*.name, 'run-evals')
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120 # free-tier rate limits make a full run slow, not failing
     env:
       DATA_MODE: fixture
       TRACING_BACKEND: none
       LLM_PROVIDER: ${{ vars.LLM_PROVIDER || 'openai' }}
       LLM_MODEL: ${{ vars.LLM_MODEL }}
+      LLM_JUDGE_MODEL: ${{ vars.LLM_JUDGE_MODEL }}
+      EVAL_CASE_DELAY_S: ${{ vars.EVAL_CASE_DELAY_S || '0' }}
       LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
     steps:
       - name: Check for the model secret
@@ -71,9 +77,9 @@ jobs:
         uses: actions/cache@v6.1.0
         with:
           path: .cache/eval-judge
-          key: eval-judge-${{ env.LLM_PROVIDER }}-${{ env.LLM_MODEL }}-${{ hashFiles('evals/datasets/manifest.json', 'evals/judge.py') }}
+          key: eval-judge-${{ env.LLM_PROVIDER }}-${{ env.LLM_JUDGE_MODEL || env.LLM_MODEL }}-${{ hashFiles('evals/datasets/manifest.json', 'evals/judge.py') }}
           restore-keys: |
-            eval-judge-${{ env.LLM_PROVIDER }}-${{ env.LLM_MODEL }}-
+            eval-judge-${{ env.LLM_PROVIDER }}-${{ env.LLM_JUDGE_MODEL || env.LLM_MODEL }}-
 
       - name: Eval (full suite, real model)
         if: steps.secret.outputs.available == 'true'
@@ -82,6 +88,7 @@ jobs:
         # reported but does not fail the job. Hard rules always fail it.
         run: >-
           uv run python -m evals.run --llm configured --baseline-advisory
+          --case-delay "${EVAL_CASE_DELAY_S}"
           ${{ (github.event_name != 'workflow_dispatch' || inputs.judge) && '--judge' || '' }}
 
       - name: Job summary
