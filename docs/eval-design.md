@@ -1,10 +1,11 @@
 # Eval design: metrics and the regression gate
 
-Status: step (r), mock baselines. The metrics and gate (step o), the datasets, harness and
-report (step p), and the CI wiring (step q) exist. Ishan approved
-`evals/baselines/mock-all.json` and `evals/baselines/mock-fast.json`. Those files omit
-latency and include mean tool calls. **No real-model numbers exist yet.** The only runs so
-far use the deterministic mock LLM, which measures the pipeline and the guards, not a model.
+Status: the metrics and gate (step o), the datasets, harness and report (step p), and the CI
+wiring (step q) exist. Ishan approved `evals/baselines/mock-all.json` and
+`evals/baselines/mock-fast.json` (step r). Those files omit latency and include mean tool
+calls. The README's [Results](../README.md#results) section copies the latest mock report.
+**No real-model numbers exist yet.** The only runs so far use the deterministic mock LLM,
+which measures the pipeline and the guards, not a model.
 
 ## Datasets (step p)
 
