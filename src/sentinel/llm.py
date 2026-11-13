@@ -2,7 +2,8 @@
 
 `LLM_PROVIDER=mock` (default) needs no key or network. Real providers are optional extras
 (`uv sync --extra openai|anthropic|google`) and require LLM_MODEL and LLM_API_KEY; no model
-name is assumed.
+name is assumed. `groq` uses Groq's OpenAI-compatible API through the `openai` extra, with
+HTTP 429 handled by `sentinel.llm_ratelimit`.
 """
 
 from __future__ import annotations
@@ -12,15 +13,24 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+import httpx
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 
 from sentinel.config import Settings
+from sentinel.llm_ratelimit import (
+    AsyncRateLimitTransport,
+    RateLimitPolicy,
+    RateLimitTransport,
+    RateLimitWaits,
+)
 from sentinel.text import content_tokens, split_sentences
 
 LLM_TIMEOUT_S = 60.0
+GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+"""From Groq's OpenAI-compatibility docs (console.groq.com/docs/openai), checked 2026-11-13."""
 INSUFFICIENT_PREFIX = "I don't have enough evidence"
 PARTIAL_PREFIX = "I could not read"
 """Start of a sentence admitting a source was unavailable (not a factual claim, needs no [n])."""
@@ -105,23 +115,84 @@ class MissingProviderError(RuntimeError):
     pass
 
 
+def rate_limited_clients(
+    waits: RateLimitWaits,
+    policy: RateLimitPolicy,
+    *,
+    sync_inner: httpx.BaseTransport | None = None,
+    async_inner: httpx.AsyncBaseTransport | None = None,
+) -> dict[str, Any]:
+    """httpx clients that wait and resend on HTTP 429, recording every wait in `waits`.
+    The inner transports default to real HTTP; tests pass `httpx.MockTransport`."""
+    return {
+        "http_client": httpx.Client(
+            transport=RateLimitTransport(sync_inner or httpx.HTTPTransport(), waits, policy),
+            timeout=LLM_TIMEOUT_S,
+        ),
+        "http_async_client": httpx.AsyncClient(
+            transport=AsyncRateLimitTransport(
+                async_inner or httpx.AsyncHTTPTransport(), waits, policy
+            ),
+            timeout=LLM_TIMEOUT_S,
+        ),
+    }
+
+
+def rate_limit_policy(settings: Settings) -> RateLimitPolicy:
+    return RateLimitPolicy(
+        retries=settings.llm_rate_limit_retries, max_wait_s=settings.llm_rate_limit_max_wait_s
+    )
+
+
+def groq_options(settings: Settings, model: str) -> dict[str, Any]:
+    """Request options for Groq. gpt-oss models return reasoning in a separate field; it is
+    not requested (`include_reasoning: false`), so it can never end up in an answer."""
+    if model.startswith("openai/gpt-oss"):
+        return {
+            "reasoning_effort": settings.groq_reasoning_effort,
+            "extra_body": {"include_reasoning": False},
+        }
+    return {}
+
+
 def make_chat_model(
-    settings: Settings, client_options: Mapping[str, Any] | None = None
+    settings: Settings,
+    client_options: Mapping[str, Any] | None = None,
+    *,
+    model: str | None = None,
+    waits: RateLimitWaits | None = None,
 ) -> BaseChatModel:
-    """`client_options` are passed to the provider class as-is (e.g. `http_client`)."""
+    """`client_options` are passed to the provider class as-is (e.g. `http_client`). `model`
+    overrides LLM_MODEL (the eval judge). `waits` collects Groq's rate-limit waits."""
     provider = settings.llm_provider
     if provider == "mock":
         return MockLLM()
     if settings.llm_api_key is None or not settings.llm_model:  # also enforced by Settings
         raise ValueError(f"LLM_PROVIDER={provider} needs LLM_MODEL and LLM_API_KEY")
+    name = model or settings.llm_model
     # Passed via a dict: the provider classes take these as pydantic aliases mypy can't see.
     common: dict[str, Any] = {
-        "model": settings.llm_model,
+        "model": name,
         "api_key": settings.llm_api_key,
         "timeout": LLM_TIMEOUT_S,
-        **(client_options or {}),
     }
     try:
+        if provider == "groq":
+            from langchain_openai import ChatOpenAI
+
+            options = {
+                **rate_limited_clients(waits or RateLimitWaits(), rate_limit_policy(settings)),
+                **(client_options or {}),
+                **groq_options(settings, name),
+                "base_url": GROQ_BASE_URL,
+            }
+            return ChatOpenAI(
+                **common,
+                **options,
+                max_retries=0,  # 429s are retried (and timed) by the rate-limit transport
+                use_responses_api=False,
+            )
+        common.update(client_options or {})
         if provider == "openai":
             from langchain_openai import ChatOpenAI
 
@@ -134,6 +205,7 @@ def make_chat_model(
 
         return ChatGoogleGenerativeAI(**common)
     except ImportError as exc:
+        extra = "openai" if provider == "groq" else provider
         raise MissingProviderError(
-            f"LLM_PROVIDER={provider} needs its extra: uv sync --extra {provider}"
+            f"LLM_PROVIDER={provider} needs its extra: uv sync --extra {extra}"
         ) from exc
