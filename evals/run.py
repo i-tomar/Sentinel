@@ -28,12 +28,13 @@ import anyio
 
 from evals.datasets import DATASETS_DIR, file_hashes, load_cases, read_manifest
 from evals.gate import GateResult, evaluate_gate
-from evals.harness import HarnessConfig, RateLimitExhaustedError, corpus_keys, run_suite
+from evals.harness import HarnessConfig, SuiteStoppedError, corpus_keys, run_suite
 from evals.judge import CachedJudge, LLMJudge
 from evals.metrics import compute_metrics
 from evals.offline import block_network
 from evals.report import build_report, render_markdown
-from evals.schema import CaseResult
+from evals.runlog import RunInProgressError, RunLog, exclusive_run, log_path, run_id
+from evals.schema import CaseResult, EvalCase
 from evals.subsets import FAST_CASES
 from sentinel.llm_ratelimit import ProviderUsage
 
@@ -61,9 +62,9 @@ def _commit() -> str | None:
     return out.stdout.strip() or None
 
 
-def _config(llm: str, case_delay_s: float = 0.0) -> HarnessConfig:
+def _config(llm: str, case_delay_s: float = 0.0, token_budget: int | None = None) -> HarnessConfig:
     if llm == "mock":
-        return HarnessConfig(case_delay_s=case_delay_s)
+        return HarnessConfig(case_delay_s=case_delay_s, token_budget=token_budget)
     from sentinel.config import get_settings
     from sentinel.graph.nodes.planner import make_planner
     from sentinel.llm import make_chat_model
@@ -71,16 +72,18 @@ def _config(llm: str, case_delay_s: float = 0.0) -> HarnessConfig:
     settings = get_settings()
     if settings.llm_provider == "mock":
         raise SystemExit("--llm configured needs LLM_PROVIDER/LLM_MODEL/LLM_API_KEY set")
-    print(f"warning: calling a real model ({settings.llm_provider}:{settings.llm_model})")
-    waits = ProviderUsage()
+    usage = ProviderUsage()
+    key = settings.llm_api_key.get_secret_value() if settings.llm_api_key else ""
     return HarnessConfig(
-        llm_factory=lambda: make_chat_model(settings, usage=waits),
+        llm_factory=lambda: make_chat_model(settings, usage=usage),
         planner_factory=lambda model: make_planner(settings.llm_provider, model),
         tokens_reported=True,
         model_name=f"{settings.llm_provider}:{settings.llm_model}",
         tool_timeout_s=settings.tool_timeout_s,
-        usage=waits,
+        usage=usage,
         case_delay_s=case_delay_s,
+        token_budget=token_budget,
+        secrets=(key,) if key else (),
     )
 
 
@@ -150,6 +153,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Pause between cases (stays under per-minute rate limits; not counted as latency).",
     )
     parser.add_argument(
+        "--token-budget",
+        type=int,
+        default=None,
+        metavar="TOKENS",
+        help="Stop before a case that would likely push the run's provider tokens past this; "
+        "a partial report is still written (exit 1).",
+    )
+    parser.add_argument(
         "--baseline-advisory",
         action="store_true",
         help="A missing/invalid baseline is reported but does not fail the exit code. "
@@ -175,36 +186,71 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--judge needs --llm configured (the mock cannot judge)")
     if args.case_delay < 0:
         raise SystemExit("--case-delay must be 0 or more")
-    config = _config(args.llm, args.case_delay)
-    judge = _judge(config, args.judge_cache) if args.judge else None
+    if args.token_budget is not None and args.token_budget <= 0:
+        raise SystemExit("--token-budget must be a positive number of tokens")
+    config = _config(args.llm, args.case_delay, args.token_budget)
+    subset = "filtered" if args.case or args.category else ("fast" if args.fast else "all")
     started = datetime.now(UTC)
+    rid = run_id(started, config.model_name, subset)
+    try:
+        with exclusive_run(args.out), RunLog(log_path(args.out, rid)) as log:
+            return _run(args, cases, config, subset, started, rid, log)
+    except RunInProgressError as exc:
+        print(f"error: {exc}", file=sys.stderr, flush=True)
+        return 1
+
+
+def _progress_line(i: int, total: int, result: CaseResult) -> str:
+    wait = f" (provider wait {result.provider_wait_ms} ms)" if result.provider_wait_ms else ""
+    if result.harness_error:
+        return (
+            f"[{i:>3}/{total}] {result.case_id:<10} error: "
+            + (result.harness_error_detail or result.harness_error)
+            + wait
+        )
+    return f"[{i:>3}/{total}] {result.case_id:<10} ok{wait}"
+
+
+def _run(
+    args: argparse.Namespace,
+    cases: list[EvalCase],
+    config: HarnessConfig,
+    subset: str,
+    started: datetime,
+    rid: str,
+    log: RunLog,
+) -> int:
+    log.line(f"run {rid}: {len(cases)} cases, model {config.model_name}, log {log.path}")
+    if config.usage is not None:
+        log.line(f"warning: calling a real model ({config.model_name})")
+    if config.token_budget is not None:
+        log.line(f"token budget: {config.token_budget}")
+    judge = _judge(config, args.judge_cache) if args.judge else None
 
     def progress(i: int, total: int, result: CaseResult) -> None:
-        status = "error" if result.harness_error else "ok"
-        wait = (
-            f" (rate-limit wait {result.provider_wait_ms} ms)"
-            if result.provider_wait_ms
-            else ""
-        )
-        print(f"[{i:>3}/{total}] {result.case_id:<10} {status}{wait}", flush=True)
+        log.line(_progress_line(i, total, result))
 
     offline = block_network() if args.llm == "mock" else nullcontext()
+    partial: dict[str, object] | None = None
     try:
         with offline:
             results = anyio.run(run_suite, cases, config, progress)
-    except RateLimitExhaustedError as exc:
-        print(
-            f"rate limit: {exc}. No report was written. Re-run later, raise "
-            "LLM_RATE_LIMIT_MAX_WAIT_S, increase --case-delay, or run --fast.",
-            file=sys.stderr,
-        )
+    except SuiteStoppedError as exc:
+        results = exc.results
+        partial = {"reason": exc.reason, "completed": len(results), "planned": exc.planned}
+        log.line(f"stopped: {exc}", err=True)
+        if judge is not None:
+            log.line("judge skipped: the run stopped early", err=True)
+            judge = None
+    if not results:
+        log.line("no case finished, so no report was written", err=True)
         return 1
     keys = corpus_keys(cases)
     flat = compute_metrics(results, corpus_keys=keys, k=args.k, judge=judge).flat()
-    subset = "filtered" if args.case or args.category else ("fast" if args.fast else "all")
     baseline_path = args.baseline or default_baseline(config.model_name, subset)
     gate = evaluate_gate(flat, baseline_path)
     note = baseline_note(gate, advisory=args.baseline_advisory)
+    usage = config.usage
     meta = {
         "model": config.model_name,
         "subset": subset,
@@ -214,18 +260,24 @@ def main(argv: list[str] | None = None) -> int:
         "cases": len(results),
         "commit": _commit(),
         "started_at": started.isoformat(timespec="seconds"),
+        "run_id": rid,
+        "log": log.path.as_posix(),
+        "partial": partial,
         "judge": judge is not None,
         "judge_cache": {"hits": judge.hits, "misses": judge.misses} if judge else None,
         "judge_model": judge.model if judge else None,
         "k": args.k,
         "baseline_note": note,
         "case_delay_s": config.case_delay_s,
-        "rate_limit": (
+        "token_budget": config.token_budget,
+        "provider": (
             {
-                "retries": config.usage.rate_limit_retries,
-                "waited_s": round(config.usage.waited_s, 1),
+                "rate_limit_retries": usage.rate_limit_retries,
+                "server_retries": usage.server_retries,
+                "waited_s": round(usage.waited_s, 1),
+                "tokens": usage.tokens,
             }
-            if config.usage
+            if usage
             else None
         ),
     }
@@ -235,10 +287,18 @@ def main(argv: list[str] | None = None) -> int:
     report.pop("_metrics_objects")
     (args.out / "metrics.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     (args.out / "report.md").write_text(markdown, encoding="utf-8")
-    print(f"wrote {args.out / 'report.md'} and {args.out / 'metrics.json'}")
-    print(f"gate: {'PASS' if gate.passed else 'FAIL'}")
+    log.line(f"wrote {args.out / 'report.md'} and {args.out / 'metrics.json'}")
+    if usage is not None:
+        log.line(
+            f"provider: {usage.tokens} tokens, {usage.rate_limit_retries} rate-limit and "
+            f"{usage.server_retries} server retries, {usage.waited_s:.1f}s waiting"
+        )
+    log.line(f"gate: {'PASS' if gate.passed else 'FAIL'}")
     if note:
-        print(note)
+        log.line(note)
+    if partial is not None:
+        log.line(f"partial run: {partial['completed']} of {partial['planned']} cases", err=True)
+        return 0 if args.report_only else 1
     if args.report_only:
         return 0
     return exit_code(gate, results, baseline_advisory=args.baseline_advisory)

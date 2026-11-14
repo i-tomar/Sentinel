@@ -162,12 +162,15 @@ class CaseResult(BaseModel):
     outputs: dict[str, str] = Field(default_factory=dict)
     """Everything that left the agent, by path: answer, result JSON, spans, audit, stores."""
     latency_ms: int = 0
-    """End-to-end agent time, with provider rate-limit waits taken out."""
+    """End-to-end agent time, with provider retry waits taken out."""
     provider_wait_ms: int = 0
-    """Time spent waiting on provider rate limits (HTTP 429) during the case; not latency."""
+    """Time spent waiting before provider retries (HTTP 429, 5xx, dropped connections) during
+    the case; not latency."""
     tool_call_count: int = 0
     input_tokens: int | None = None
     output_tokens: int | None = None
     """None means the provider did not report tokens (e.g. the mock); never a made-up 0."""
     harness_error: str | None = None
-    """The case could not run (exception type only); every expectation then counts as failed."""
+    """The case could not run (exception type); every expectation then counts as failed."""
+    harness_error_detail: str | None = None
+    """One redacted line saying why (evals.safe_errors): no secrets, no detected PII."""

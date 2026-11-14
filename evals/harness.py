@@ -27,6 +27,7 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from qdrant_client import QdrantClient
 
+from evals.safe_errors import leaf_exception, safe_error_message
 from evals.schema import CaseResult, Citation, EvalCase, ExecutedWrite
 from sentinel.citations import cited_numbers
 from sentinel.graph.build import AskResult, Deps, ask_async, build_graph
@@ -66,21 +67,62 @@ class HarnessConfig:
     fixture_timeout_s: float = 5.0
     """How long the fixture `timeout` failure mode stalls: well past `tool_timeout_s`."""
     usage: ProviderUsage | None = None
-    """Shared with the model's HTTP clients (Groq): waits are taken out of latency, and an
-    exhausted rate limit stops the suite."""
+    """Shared with the model's HTTP clients (Groq): retry waits are taken out of latency, the
+    token count feeds `token_budget`, and an exhausted rate limit stops the suite."""
     case_delay_s: float = 0.0
     """Pause between cases, to stay under a provider's per-minute limits. Not latency."""
     case_sleep: Callable[[float], Awaitable[None]] = anyio.sleep
+    token_budget: int | None = None
+    """Stop before a case that would likely push the run's total tokens past this."""
+    secrets: tuple[str, ...] = field(default=(), repr=False)
+    """Values scrubbed from per-case error messages (the API key)."""
 
 
-class RateLimitExhaustedError(RuntimeError):
+class SuiteStoppedError(RuntimeError):
+    """The suite stopped early; `results` holds the cases that finished."""
+
+    def __init__(self, reason: str, results: list[CaseResult], planned: int) -> None:
+        super().__init__(f"stopped after {len(results)}/{planned} cases: {reason}")
+        self.reason = reason
+        self.results = results
+        self.planned = planned
+
+
+class RateLimitExhaustedError(SuiteStoppedError):
     """The provider kept rate-limiting (or asked for a longer wait than allowed)."""
 
 
+class TokenBudgetError(SuiteStoppedError):
+    """The next case would likely push the run past its token budget."""
+
+
 def agent_latency_ms(elapsed_ms: int, waited_s: float) -> tuple[int, int]:
-    """(latency without rate-limit waits, the waits) in ms."""
+    """(latency without provider retry waits, the waits) in ms."""
     waited_ms = round(waited_s * 1000)
     return max(0, elapsed_ms - waited_ms), waited_ms
+
+
+def tokens_used(config: HarnessConfig, results: Sequence[CaseResult]) -> int:
+    """Provider-reported tokens so far: every call (planner, answer, earlier turns) when the
+    HTTP layer counts them, otherwise the per-case totals."""
+    if config.usage is not None:
+        return config.usage.tokens
+    return sum((r.input_tokens or 0) + (r.output_tokens or 0) for r in results)
+
+
+def over_budget(config: HarnessConfig, results: Sequence[CaseResult]) -> str | None:
+    """Why the next case must not start, or None. Uses the mean cost of the cases so far, so
+    the run stops *before* a case that would likely cross the budget."""
+    if config.token_budget is None or not results:
+        return None
+    used = tokens_used(config, results)
+    per_case = used / len(results)
+    if used + per_case <= config.token_budget:
+        return None
+    return (
+        f"token budget: {used} of {config.token_budget} tokens used, and a case costs about "
+        f"{per_case:.0f}"
+    )
 
 
 def corpus_keys(cases: Sequence[EvalCase], dataset: FixtureDataset | None = None) -> set[str]:
@@ -174,7 +216,11 @@ async def run_case(
         return await _run(case, config, ds)
     except Exception as exc:
         return _expected(case).model_copy(
-            update={"answer": "", "harness_error": f"{type(exc).__name__}"}
+            update={
+                "answer": "",
+                "harness_error": type(leaf_exception(exc)).__name__,
+                "harness_error_detail": safe_error_message(exc, config.secrets),
+            }
         )
 
 
@@ -304,12 +350,19 @@ async def run_suite(
     progress: Callable[[int, int, CaseResult], None] | None = None,
 ) -> list[CaseResult]:
     """Cases run one at a time: failure rules are process-wide environment variables.
-    Raises `RateLimitExhaustedError` (after reporting that case) once the provider's rate
-    limit could not be waited out, instead of failing every remaining case."""
+
+    Stops early, raising a `SuiteStoppedError` that carries the finished cases (so a partial
+    report can still be written):
+    - `RateLimitExhaustedError` after a case whose rate limit could not be waited out;
+    - `TokenBudgetError` before a case that would likely cross `config.token_budget`.
+    """
     config = config or HarnessConfig()
     ds = build_dataset()
     results: list[CaseResult] = []
     for i, case in enumerate(cases, start=1):
+        reason = over_budget(config, results)
+        if reason is not None:
+            raise TokenBudgetError(reason, results, len(cases))
         if i > 1 and config.case_delay_s > 0:
             await config.case_sleep(config.case_delay_s)
         result = await run_case(case, config, ds)
@@ -317,7 +370,5 @@ async def run_suite(
         if progress:
             progress(i, len(cases), result)
         if config.usage is not None and config.usage.exhausted:
-            raise RateLimitExhaustedError(
-                f"stopped after {i}/{len(cases)} cases: {config.usage.exhausted_reason}"
-            )
+            raise RateLimitExhaustedError(config.usage.exhausted_reason, results, len(cases))
     return results

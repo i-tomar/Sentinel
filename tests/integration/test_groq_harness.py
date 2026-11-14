@@ -18,17 +18,20 @@ from evals.gate import evaluate_gate
 from evals.harness import (
     HarnessConfig,
     RateLimitExhaustedError,
+    TokenBudgetError,
     agent_latency_ms,
+    over_budget,
     run_case,
     run_suite,
 )
 from evals.metrics import compute_metrics
-from evals.report import build_report, render_markdown
+from evals.report import build_report, case_failures, render_markdown
+from evals.run import _progress_line
 from evals.schema import EvalCase
 from sentinel.config import Settings
 from sentinel.graph.nodes.planner import make_planner
 from sentinel.llm import make_chat_model, rate_limited_clients
-from sentinel.llm_ratelimit import RateLimitPolicy, ProviderUsage
+from sentinel.llm_ratelimit import ProviderUsage, RateLimitPolicy
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -60,11 +63,20 @@ def _completion(prompt: int, out: int) -> dict[str, Any]:
 
 
 class FakeGroq:
-    """Answers every chat completion; optionally rate-limits the first `limited` requests."""
+    """Answers every chat completion. The first `limited` requests get a 429, or the status in
+    `fail_status` with `fail_body` instead when that is set."""
 
-    def __init__(self, limited: int = 0, retry_after: str = "0") -> None:
+    def __init__(
+        self,
+        limited: int = 0,
+        retry_after: str = "0",
+        fail_status: int = 429,
+        fail_body: dict[str, Any] | None = None,
+    ) -> None:
         self.limited = limited
         self.retry_after = retry_after
+        self.fail_status = fail_status
+        self.fail_body = fail_body or {"error": {"message": "slow down"}}
         self.requests: list[httpx.Request] = []
         self.answered = 0
 
@@ -72,11 +84,8 @@ class FakeGroq:
         self.requests.append(request)
         assert request.url.host == "api.groq.com"
         if len(self.requests) <= self.limited:
-            return httpx.Response(
-                429,
-                headers={"retry-after": self.retry_after},
-                json={"error": {"message": "slow down"}},
-            )
+            headers = {"retry-after": self.retry_after} if self.fail_status == 429 else {}
+            return httpx.Response(self.fail_status, headers=headers, json=self.fail_body)
         self.answered += 1
         return httpx.Response(200, json=_completion(prompt=100 + self.answered, out=10))
 
@@ -99,6 +108,7 @@ def _config(fake: FakeGroq, policy: RateLimitPolicy | None = None, **changes: An
         tokens_reported=True,
         model_name=f"groq:{MODEL}",
         usage=waits,
+        secrets=(FAKE_KEY,),  # as evals.run passes the configured key
         **changes,
     )
 
@@ -189,3 +199,62 @@ async def test_the_key_never_reaches_results_or_reports() -> None:
 
 def _missing_baseline() -> Path:
     return Path("does-not-exist-baseline.json")
+
+
+async def test_server_error_waits_are_not_agent_latency() -> None:
+    fake = FakeGroq(limited=1, fail_status=503, fail_body={"error": {"message": "overloaded"}})
+    config = _config(fake)  # default server backoff: 1 s before the first resend
+    started = time.perf_counter()
+    result = await run_case(_case("norm-001"), config)
+    wall_ms = (time.perf_counter() - started) * 1000
+    assert result.harness_error is None
+    assert config.usage is not None
+    assert config.usage.server_retries == 1
+    assert result.provider_wait_ms == 1000
+    assert result.latency_ms <= wall_ms - 1000
+
+
+async def test_a_failed_case_records_a_safe_reason() -> None:
+    body = {
+        "error": {
+            "message": f"bad request from priya.sharma@acme.test with key {FAKE_KEY}",
+            "type": "invalid_request_error",
+        }
+    }
+    fake = FakeGroq(limited=1_000, fail_status=400, fail_body=body)
+    result = await run_case(_case("norm-001"), _config(fake))
+    # the real error, not the ExceptionGroup the agent's task groups wrap it in
+    assert result.harness_error == "OpenAIInvalidRequestError"  # langchain's 400 subclass
+    detail = result.harness_error_detail
+    assert detail is not None
+    assert detail.startswith("OpenAIInvalidRequestError: Error code: 400")
+    assert "bad request from <EMAIL> with key <SECRET>" in detail
+    assert FAKE_KEY not in detail
+    assert "priya.sharma@acme.test" not in detail
+    assert "\n" not in detail
+    line = _progress_line(7, 52, result)
+    assert line.startswith("[  7/52] norm-001   error: OpenAIInvalidRequestError: Error code: 400")
+    assert FAKE_KEY not in line
+    failures = case_failures(result)
+    assert failures == [f"harness error ({detail})"]
+
+
+async def test_the_token_budget_stops_before_crossing_it() -> None:
+    fake = FakeGroq()
+    config = _config(fake, token_budget=300)
+    cases = [_case("norm-001"), _case("norm-002"), _case("bl-d01")]
+    with pytest.raises(TokenBudgetError, match=r"stopped after 1/3 cases: token budget") as caught:
+        await run_suite(cases, config)
+    assert [r.case_id for r in caught.value.results] == ["norm-001"]
+    assert caught.value.planned == 3
+    assert config.usage is not None
+    first_case_tokens = config.usage.tokens
+    assert first_case_tokens == sum(100 + i + 10 for i in range(1, fake.answered + 1))
+    assert first_case_tokens <= 300  # the next case (about as costly) would have crossed it
+
+
+async def test_a_large_budget_does_not_stop_the_run() -> None:
+    config = _config(FakeGroq(), token_budget=1_000_000)
+    results = await run_suite([_case("norm-001"), _case("norm-002")], config)
+    assert len(results) == 2
+    assert over_budget(config, results) is None
