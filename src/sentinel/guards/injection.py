@@ -175,6 +175,31 @@ RULES: tuple[Rule, ...] = (
         ),
         0.35,
     ),
+    Rule(
+        # Bulk dump even when the destination address was redacted away. Weight alone clears
+        # the default threshold: "forward all invoices" in retrieved mail is rarely benign.
+        "bulk_exfiltration",
+        _r(
+            r"\b(?:forward|send|email|mail|share|leak|exfiltrate)\b[^.\n]{0,40}?"
+            r"\b(?:all|every|full|entire)\b[^.\n]{0,40}?"
+            r"\b(?:invoices?|customer lists?|team directory|payroll|api[ _-]?keys?|"
+            r"credentials?|secrets?)\b"
+        ),
+        0.55,
+        retrieved_only=True,
+    ),
+    Rule(
+        # Imperative "set PROJ-123 to Done" in retrieved text is tool coercion without a
+        # tool name. Weight is below threshold alone so ordinary comments need another signal
+        # (addresses_the_ai, false_authority, ...). Status fields do not match.
+        "ticket_status_coercion",
+        _r(
+            r"\b(?:set|mark|move|close|change)\s+[A-Z][A-Z0-9]+-\d+\b[^.\n]{0,80}?"
+            r"\bto\s+Done\b"
+        ),
+        0.35,
+        retrieved_only=True,
+    ),
     Rule("sensitive_target", _r(rf"\b{_SENSITIVE}\b"), 0.3),
     Rule(
         "privilege_escalation",

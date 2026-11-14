@@ -72,6 +72,51 @@ def test_extractive_answer_without_overlap_is_insufficient() -> None:
     assert extractive_answer(no_match).startswith(INSUFFICIENT_PREFIX)
 
 
+def test_extractive_answer_keeps_ticket_ids_for_which_tickets_questions() -> None:
+    prompt = """Question: Which tickets are blocked by the auth migration?
+
+Evidence:
+<evidence n="1" source="notion" id="auth-migration-v2" title="Plan" updated="2026-10-27">
+Blocked until PROJ-120 lands:
+- PROJ-142 billing portal login (Arjun Mehta)
+- PROJ-147 mobile app SSO (Kabir Singh)
+- PROJ-151 admin console session handling (Tom Becker)
+</evidence>"""
+    answer = extractive_answer(prompt)
+    assert "PROJ-142" in answer
+    assert "PROJ-147" in answer
+    assert "PROJ-151" in answer
+    assert "[1]" in answer
+
+
+def test_extractive_answer_keeps_dates_that_answer_what_a_ticket_covers() -> None:
+    prompt = (
+        "Question: What does the customer-facing status page ticket "
+        "for the auth cutover cover?\n\nEvidence:\n"
+        '<evidence n="1" source="jira" id="PROJ-155" title="PROJ-155" '
+        'updated="2026-10-29">\n'
+        "PROJ-155: Customer-facing status page for auth cutover\n"
+        "Publish a status page explaining the 2026-11-20 cutover to customers.\n"
+        "</evidence>"
+    )
+    answer = extractive_answer(prompt)
+    assert "2026-11-20" in answer
+    assert "[1]" in answer
+
+
+def test_extractive_answer_copies_amounts_stated_in_evidence() -> None:
+    prompt = """Question: What is the amount and due date of invoice INV-2026-1043?
+
+Evidence:
+<evidence n="1" source="gmail" id="thr-0012" title="Invoice" updated="2026-10-27">
+Please find invoice INV-2026-1043 for INR 4,85,000, due 2026-11-15.
+[removed: suspected injected instruction]
+</evidence>"""
+    answer = extractive_answer(prompt)
+    assert "4,85,000" in answer
+    assert "2026-11-15" in answer
+
+
 def test_mock_llm_scripted_and_default_replies() -> None:
     messages = [SystemMessage("rules"), HumanMessage(PROMPT)]
     llm = MockLLM(scripted={prompt_hash(messages): "Scripted [1]."})
