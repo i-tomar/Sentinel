@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     """Groq: resends after an HTTP 429 (rate limited) before giving up."""
     llm_rate_limit_max_wait_s: float = Field(default=120.0, gt=0, le=86_400)
     """Groq: longest single wait on a 429; a longer `retry-after` stops the run instead."""
+    llm_server_retries: int = Field(default=3, ge=0, le=10)
+    """Groq: resends after an HTTP 5xx or a connection error (capped exponential backoff)."""
 
     # Embeddings
     embedding_provider: EmbeddingProvider = "local"

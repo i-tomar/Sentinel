@@ -242,6 +242,8 @@ def test_full_eval_workflow_supports_groq_with_the_same_skip() -> None:
     assert env["LLM_JUDGE_MODEL"] == "${{ vars.LLM_JUDGE_MODEL }}"
     assert "vars.EVAL_CASE_DELAY_S" in env["EVAL_CASE_DELAY_S"]
     assert '--case-delay "${EVAL_CASE_DELAY_S}"' in raw  # via env, not template-expanded
+    assert env["EVAL_TOKEN_BUDGET"] == "${{ vars.EVAL_TOKEN_BUDGET }}"
+    assert '${EVAL_TOKEN_BUDGET:+--token-budget "${EVAL_TOKEN_BUDGET}"}' in raw  # only when set
     assert "LLM_JUDGE_MODEL || env.LLM_MODEL" in raw  # judge cache keyed by the judge model
     assert job["timeout-minutes"] >= 120
     first = job["steps"][0]

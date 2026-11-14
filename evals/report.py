@@ -80,7 +80,8 @@ def case_failures(r: CaseResult) -> list[str]:
     """Why a case falls short of its expectations (ids and short reasons only)."""
     reasons: list[str] = []
     if r.harness_error:
-        return [f"harness error ({r.harness_error})"]
+        detail = (r.harness_error_detail or r.harness_error).replace("|", "/")
+        return [f"harness error ({detail})"]
     if r.expected_facts and not r.should_refuse and not facts_present(r):
         missing = [f for f in r.expected_facts if f.casefold() not in r.answer.casefold()]
         reasons.append("expected facts missing" + (f" ({len(missing)})" if missing else ""))
@@ -152,6 +153,14 @@ def build_report(
     }
 
 
+def partial_note(partial: dict[str, Any]) -> str:
+    return (
+        f"PARTIAL RUN: stopped after {partial['completed']} of {partial['planned']} cases "
+        f"({partial['reason']}). Metrics cover only the completed cases; do not compare them "
+        "with a baseline or quote them as results."
+    )
+
+
 def render_markdown(report: dict[str, Any], gate: GateResult) -> str:
     meta = report["meta"]
     metrics: dict[str, Metrics] = report["_metrics_objects"]
@@ -166,11 +175,13 @@ def render_markdown(report: dict[str, Any], gate: GateResult) -> str:
         ),
         f"- Dataset version: {meta['dataset_version']} ({meta['cases']} cases, "
         f"subset: {meta.get('subset', 'all')})",
-        f"- Commit: {meta.get('commit') or 'unknown'}; run at {meta['started_at']}",
+        f"- Commit: {meta.get('commit') or 'unknown'}; run at {meta['started_at']}"
+        + (f"; run id {meta['run_id']}" if meta.get("run_id") else ""),
         f"- Judge: {'on' if meta.get('judge') else 'off (judge-only cases are unscored)'}",
         "- Splits: `dev` may reuse fixture payloads, detector samples or rule wording; "
         "`heldout` was written independently of both and was never used to tune the guards.",
         "",
+        *([f"> **{partial_note(meta['partial'])}**", ""] if meta.get("partial") else []),
         *([f"> **{meta['baseline_note']}**", ""] if meta.get("baseline_note") else []),
         "## Metrics",
         "",

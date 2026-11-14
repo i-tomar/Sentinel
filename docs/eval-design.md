@@ -83,19 +83,46 @@ The harness then fills a `CaseResult`:
 `--llm configured` runs against the model in `LLM_PROVIDER`, `LLM_MODEL` and `LLM_API_KEY`.
 It is opt-in, never used by tests, and reports tokens where the provider returns them.
 
-**Rate limits (Groq).** `sentinel.llm_ratelimit` wraps the model's HTTP clients:
+**Rate limits and retries (Groq).** `sentinel.llm_ratelimit` wraps the model's HTTP clients:
 
 - **Waiting out a 429.** The client waits for the server's `retry-after` seconds, or backs
   off exponentially when there is none, then resends the same request, up to
-  `LLM_RATE_LIMIT_RETRIES` times. The OpenAI client's own retries are turned off, so every
-  wait goes through this one path.
-- **Not latency.** Each case reports `rate_limit_wait_ms`, and its `latency_ms` has that time
-  taken out. `--case-delay SECONDS` pauses between cases, outside latency too.
-- **Stopping.** If the server asks for a wait longer than `LLM_RATE_LIMIT_MAX_WAIT_S`, or the
-  retries run out, the run stops after that case with a message. No report is written, so a
-  daily limit doesn't produce a report full of failed cases.
+  `LLM_RATE_LIMIT_RETRIES` times.
+- **5xx and dropped connections.** These are resent after an exponential backoff capped at
+  30 s, up to `LLM_SERVER_RETRIES` times. The OpenAI client's own retries are turned off, so
+  every wait goes through this one path.
+- **Not latency.** Each case reports `provider_wait_ms` (every retry wait), and its
+  `latency_ms` has that time taken out. `--case-delay SECONDS` pauses between cases, outside
+  latency too.
+- **Token budget.** The transport adds up `usage.total_tokens` from every completion:
+  planner, answer, earlier turns of a case, and the judge. With `--token-budget TOKENS`, the
+  run stops before a case that would likely cross the budget, estimated from the mean cost of
+  the cases so far.
+- **Stopping cleanly.** The run stops early in two situations:
+  - the server asks for a wait longer than `LLM_RATE_LIMIT_MAX_WAIT_S`, or the 429 retries
+    run out;
+  - the token budget would be crossed.
+
+  The cases that finished are still reported, in a report marked **PARTIAL RUN** at the top
+  (and in `meta.partial`). It must not be compared with a baseline. The judge is skipped and
+  the exit code is 1.
 - **Per-model judge.** `LLM_JUDGE_MODEL` (same provider and key) selects the judge model, and
   the verdict cache is keyed by it.
+
+**Run records.**
+
+- **A log per run.** Each run has a run id (UTC start time, model, subset, process id) and
+  writes `reports/logs/eval-<run id>.log`. The progress lines, error messages and outcome go
+  to the console and the log, flushed as they are written, and the report names the run id.
+  A repeated run gets a new log and never overwrites an earlier one.
+- **One run per directory.** `evals.runlog.exclusive_run` holds an OS lock on
+  `<out>/.eval.lock`, so a second run started while one is writing the same directory exits
+  with an error. The OS releases the lock if the process dies.
+- **Failed cases.** A case that cannot run keeps the underlying error type
+  (`harness_error`), unwrapped from the agent's exception groups, and a one-line message
+  (`harness_error_detail`, from `evals.safe_errors`). The message has the configured key,
+  anything key-shaped, organisation ids and detected PII removed, and is printed on the
+  progress line.
 
 **Why mock numbers are not model results.** The mock LLM answers by copying evidence
 sentences. It never follows instructions, so it can't be jailbroken, and it doesn't phrase

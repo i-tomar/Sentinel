@@ -23,13 +23,13 @@ from sentinel.llm import (
     rate_limit_policy,
     rate_limited_clients,
 )
-from sentinel.llm_ratelimit import RateLimitPolicy, RateLimitWaits
+from sentinel.llm_ratelimit import ProviderUsage, RateLimitPolicy
 
 pytestmark = pytest.mark.unit
 
 FAKE_KEY = "gsk_test_" + "k3y" * 8
 MODEL = "openai/gpt-oss-120b"
-NO_WAIT = RateLimitPolicy(backoff_s=0.0)
+NO_WAIT = RateLimitPolicy(backoff_s=0.0, server_backoff_s=0.0)
 
 
 def _settings(**changes: Any) -> Settings:
@@ -72,11 +72,11 @@ Handler = Callable[[httpx.Request], httpx.Response]
 
 def _model(
     handler: Handler, settings: Settings | None = None, policy: RateLimitPolicy = NO_WAIT
-) -> tuple[Any, RateLimitWaits]:
-    waits = RateLimitWaits()
+) -> tuple[Any, ProviderUsage]:
+    waits = ProviderUsage()
     mock = httpx.MockTransport(handler)
     clients = rate_limited_clients(waits, policy, sync_inner=mock, async_inner=mock)
-    return make_chat_model(settings or _settings(), clients, waits=waits), waits
+    return make_chat_model(settings or _settings(), clients, usage=waits), waits
 
 
 def _recording(*responses: httpx.Response) -> tuple[Handler, list[httpx.Request]]:
@@ -163,7 +163,7 @@ def test_reasoning_effort_is_configurable() -> None:
 def test_the_judge_model_override() -> None:
     handler, seen = _recording()
     mock = httpx.MockTransport(handler)
-    clients = rate_limited_clients(RateLimitWaits(), NO_WAIT, sync_inner=mock, async_inner=mock)
+    clients = rate_limited_clients(ProviderUsage(), NO_WAIT, sync_inner=mock, async_inner=mock)
     judge = make_chat_model(_settings(), clients, model="openai/gpt-oss-20b")
     judge.invoke([HumanMessage("grade")])
     assert json.loads(seen[0].content)["model"] == "openai/gpt-oss-20b"
@@ -221,7 +221,7 @@ def test_a_429_is_retried_by_the_transport_not_the_client() -> None:
     reply = llm.invoke([HumanMessage("hi")])
     assert reply.content == "PROJ-142 is blocked [1]."
     assert len(seen) == 3
-    assert waits.retries == 2
+    assert waits.rate_limit_retries == 2
     # the OpenAI client never retried on its own: every attempt carries retry count 0
     assert {r.headers.get("x-stainless-retry-count") for r in seen} == {"0"}
 
@@ -231,7 +231,7 @@ def test_a_429_on_the_async_path() -> None:
     llm, waits = _model(handler)
     reply = anyio.run(llm.ainvoke, [HumanMessage("hi")])
     assert reply.usage_metadata["input_tokens"] == 120
-    assert (len(seen), waits.retries) == (2, 1)
+    assert (len(seen), waits.rate_limit_retries) == (2, 1)
 
 
 def test_an_exhausted_rate_limit_raises_and_is_marked() -> None:
@@ -245,10 +245,46 @@ def test_an_exhausted_rate_limit_raises_and_is_marked() -> None:
 
 
 def test_the_rate_limit_policy_comes_from_settings() -> None:
-    policy = rate_limit_policy(_settings(llm_rate_limit_retries=3, llm_rate_limit_max_wait_s=45))
-    assert (policy.retries, policy.max_wait_s) == (3, 45.0)
+    policy = rate_limit_policy(
+        _settings(llm_rate_limit_retries=3, llm_rate_limit_max_wait_s=45, llm_server_retries=1)
+    )
+    assert (policy.retries, policy.max_wait_s, policy.server_retries) == (3, 45.0, 1)
     defaults = rate_limit_policy(_settings())
-    assert (defaults.retries, defaults.max_wait_s) == (6, 120.0)
+    assert (defaults.retries, defaults.max_wait_s, defaults.server_retries) == (6, 120.0, 3)
+
+
+def test_a_groq_5xx_is_retried_by_the_transport() -> None:
+    handler, seen = _recording(httpx.Response(503, json={"error": {"message": "overloaded"}}))
+    llm, usage = _model(handler)
+    reply = llm.invoke([HumanMessage("hi")])
+    assert reply.content == "PROJ-142 is blocked [1]."
+    assert (len(seen), usage.server_retries) == (2, 1)
+    assert {r.headers.get("x-stainless-retry-count") for r in seen} == {"0"}  # not the client
+
+
+def test_a_dropped_groq_connection_is_retried() -> None:
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        if len(calls) == 1:
+            raise httpx.ConnectError("connection reset", request=request)
+        return httpx.Response(200, json=completion(prompt=10, out=2))
+
+    llm, usage = _model(handler)
+    reply = anyio.run(llm.ainvoke, [HumanMessage("hi")])
+    assert reply.usage_metadata["input_tokens"] == 10
+    assert (len(calls), usage.server_retries) == (2, 1)
+    assert usage.tokens == 12  # counted from the response's usage.total_tokens
+
+
+def test_a_groq_outage_raises_after_the_retries() -> None:
+    handler, seen = _recording(*[httpx.Response(500) for _ in range(5)])
+    llm, usage = _model(handler, policy=RateLimitPolicy(server_retries=2, server_backoff_s=0.0))
+    with pytest.raises(openai.InternalServerError) as caught:
+        llm.invoke([HumanMessage("hi")])
+    assert (len(seen), usage.server_retries) == (3, 2)
+    assert FAKE_KEY not in str(caught.value)
 
 
 # --- the key never leaks -------------------------------------------------------------------

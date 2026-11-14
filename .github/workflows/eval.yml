@@ -6,9 +6,11 @@ name: eval (real model)
 #   LLM_MODEL. Without the secret (not configured, or a fork PR, which never gets secrets)
 #   the job writes "skipped" to the summary and succeeds: nothing runs, nothing fails.
 # - Groq: LLM_PROVIDER=groq, LLM_MODEL=<a Groq model id>, LLM_API_KEY=<a Groq key>. Optional
-#   variables: LLM_JUDGE_MODEL (judge model, same provider and key) and EVAL_CASE_DELAY_S
-#   (pause between cases for free-tier per-minute limits). HTTP 429s are waited out and not
-#   counted as latency; a limit that cannot be waited out stops the run with a message.
+#   variables: LLM_JUDGE_MODEL (judge model, same provider and key), EVAL_CASE_DELAY_S
+#   (pause between cases for free-tier per-minute limits) and EVAL_TOKEN_BUDGET (stop before
+#   the run would pass this many provider tokens). HTTP 429, 5xx and dropped connections are
+#   retried and the waits are not counted as latency. A limit that cannot be waited out, or
+#   the token budget, stops the run with a partial report (and a failed job).
 # - Fixture data only (DATA_MODE=fixture): the model is real, the workspace data is not.
 on:
   pull_request:
@@ -43,6 +45,7 @@ jobs:
       LLM_MODEL: ${{ vars.LLM_MODEL }}
       LLM_JUDGE_MODEL: ${{ vars.LLM_JUDGE_MODEL }}
       EVAL_CASE_DELAY_S: ${{ vars.EVAL_CASE_DELAY_S || '0' }}
+      EVAL_TOKEN_BUDGET: ${{ vars.EVAL_TOKEN_BUDGET }}
       LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
     steps:
       - name: Check for the model secret
@@ -89,6 +92,7 @@ jobs:
         run: >-
           uv run python -m evals.run --llm configured --baseline-advisory
           --case-delay "${EVAL_CASE_DELAY_S}"
+          ${EVAL_TOKEN_BUDGET:+--token-budget "${EVAL_TOKEN_BUDGET}"}
           ${{ (github.event_name != 'workflow_dispatch' || inputs.judge) && '--judge' || '' }}
 
       - name: Job summary

@@ -145,13 +145,25 @@ edited, or a case cannot run. A real model is opt-in: `uv sync --extra openai` (
 
 **Groq** (`LLM_PROVIDER=groq`) uses Groq's OpenAI-compatible API through the `openai` extra.
 Put the key in `.env` as `LLM_API_KEY`; it is never logged, traced or written to a report.
-`LLM_JUDGE_MODEL` optionally picks a different judge model. On HTTP 429 the client waits
-(`retry-after`, or exponential backoff) and resends, up to `LLM_RATE_LIMIT_RETRIES` times.
-Those waits are reported per case and are not counted as latency. `--case-delay SECONDS`
-paces the cases. A limit that would need a wait longer than `LLM_RATE_LIMIT_MAX_WAIT_S`
-(for example a daily token limit) stops the run with a message instead of failing every
-remaining case. Real-model baselines are per model, for example
-`evals/baselines/groq-openai-gpt-oss-120b-all.json`; none exists yet.
+`LLM_JUDGE_MODEL` optionally picks a different judge model. Retries and limits:
+
+- **HTTP 429:** the client waits (`retry-after`, or exponential backoff) and resends, up to
+  `LLM_RATE_LIMIT_RETRIES` times.
+- **HTTP 5xx and dropped connections:** resent after a capped backoff, up to
+  `LLM_SERVER_RETRIES` times.
+- **Waits are not latency.** All retry waits are reported per case (`provider_wait_ms`) and
+  left out of latency.
+- **Pacing:** `--case-delay SECONDS` pauses between cases.
+- **Stopping cleanly.** The run stops with a **partial report** (marked as such, exit 1)
+  when a limit needs a wait longer than `LLM_RATE_LIMIT_MAX_WAIT_S` (for example a daily
+  token limit), or before a case that would push it past `--token-budget TOKENS`.
+- **Run records.** Every run writes its own timestamped log, `reports/logs/eval-<run id>.log`.
+  Each failed case gets a one-line error message with secrets and detected PII removed.
+
+Real-model baselines are per model, for example
+`evals/baselines/groq-openai-gpt-oss-120b-all.json`; none exists yet. Models that cite in
+other bracket styles (gpt-oss uses lenticular brackets) are normalised to `[n]` before the
+citation check.
 
 **Without GNU make** (for example Windows PowerShell), run the commands from the `Makefile`
 directly: `uv run sentinel ingest`, `uv run sentinel ask "..."`, `uv run python -m evals.run`

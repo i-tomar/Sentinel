@@ -8,6 +8,7 @@ never be satisfied by a fabricated source.
 from __future__ import annotations
 
 import re
+import unicodedata
 from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -16,6 +17,14 @@ from sentinel.retrieval.models import Chunk, Document, Source, doc_key
 
 SNIPPET_CHARS = 280
 _MARKER = re.compile(r"\[(\d{1,3})\]")
+# Other citation styles models emit: gpt-oss wraps the number in lenticular brackets
+# (U+3010/U+3011), sometimes with a dagger and a source name inside; others use full-width
+# square brackets (U+FF3B/U+FF3D). Digits may be full-width, and lists comma-separated.
+_DIGITS = r"[0-9\uff10-\uff19]{1,3}"
+_FOREIGN_MARKER = re.compile(
+    rf"[\u3010\uff3b]\s*({_DIGITS}(?:\s*[,\uff0c\u3001]\s*{_DIGITS})*)"
+    r"(?:\s*\u2020[^\u3011\uff3d\n]{0,80})?\s*[\u3011\uff3d]"
+)
 _SOURCE_LABEL: dict[Source, str] = {"notion": "Notion", "jira": "Jira", "gmail": "Gmail"}
 
 
@@ -41,6 +50,18 @@ class Citation(BaseModel):
             f"- updated {self.updated_at.date().isoformat()}, "
             f"fetched {self.fetched_at.isoformat(timespec='seconds')}"
         )
+
+
+def normalize_markers(text: str) -> str:
+    """Rewrite lenticular-bracket and full-width-bracket citations (with an optional dagger
+    and source name, or a comma list) as `[n]` markers, so the citation check sees every
+    citation the model made. Plain `[n]` is left as is."""
+
+    def plain(match: re.Match[str]) -> str:
+        numbers = re.split(r"\s*[,\uff0c\u3001]\s*", match.group(1).strip())
+        return "".join(f"[{int(unicodedata.normalize('NFKC', n))}]" for n in numbers)
+
+    return _FOREIGN_MARKER.sub(plain, text)
 
 
 def cited_numbers(text: str) -> list[int]:
