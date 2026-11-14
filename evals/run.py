@@ -35,7 +35,7 @@ from evals.offline import block_network
 from evals.report import build_report, render_markdown
 from evals.schema import CaseResult
 from evals.subsets import FAST_CASES
-from sentinel.llm_ratelimit import RateLimitWaits
+from sentinel.llm_ratelimit import ProviderUsage
 
 BASELINES_DIR = Path(__file__).parent / "baselines"
 
@@ -72,14 +72,14 @@ def _config(llm: str, case_delay_s: float = 0.0) -> HarnessConfig:
     if settings.llm_provider == "mock":
         raise SystemExit("--llm configured needs LLM_PROVIDER/LLM_MODEL/LLM_API_KEY set")
     print(f"warning: calling a real model ({settings.llm_provider}:{settings.llm_model})")
-    waits = RateLimitWaits()
+    waits = ProviderUsage()
     return HarnessConfig(
-        llm_factory=lambda: make_chat_model(settings, waits=waits),
+        llm_factory=lambda: make_chat_model(settings, usage=waits),
         planner_factory=lambda model: make_planner(settings.llm_provider, model),
         tokens_reported=True,
         model_name=f"{settings.llm_provider}:{settings.llm_model}",
         tool_timeout_s=settings.tool_timeout_s,
-        rate_limits=waits,
+        usage=waits,
         case_delay_s=case_delay_s,
     )
 
@@ -92,7 +92,7 @@ def _judge(config: HarnessConfig, cache: Path) -> CachedJudge:
 
     settings = get_settings()
     model = settings.llm_judge_model or settings.llm_model
-    llm = make_chat_model(settings, model=model, waits=config.rate_limits)
+    llm = make_chat_model(settings, model=model, usage=config.usage)
     return CachedJudge(LLMJudge(llm), cache, model=f"{settings.llm_provider}:{model}")
 
 
@@ -182,8 +182,8 @@ def main(argv: list[str] | None = None) -> int:
     def progress(i: int, total: int, result: CaseResult) -> None:
         status = "error" if result.harness_error else "ok"
         wait = (
-            f" (rate-limit wait {result.rate_limit_wait_ms} ms)"
-            if result.rate_limit_wait_ms
+            f" (rate-limit wait {result.provider_wait_ms} ms)"
+            if result.provider_wait_ms
             else ""
         )
         print(f"[{i:>3}/{total}] {result.case_id:<10} {status}{wait}", flush=True)
@@ -222,10 +222,10 @@ def main(argv: list[str] | None = None) -> int:
         "case_delay_s": config.case_delay_s,
         "rate_limit": (
             {
-                "retries": config.rate_limits.retries,
-                "waited_s": round(config.rate_limits.waited_s, 1),
+                "retries": config.usage.rate_limit_retries,
+                "waited_s": round(config.usage.waited_s, 1),
             }
-            if config.rate_limits
+            if config.usage
             else None
         ),
     }

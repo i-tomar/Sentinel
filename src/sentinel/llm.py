@@ -22,9 +22,9 @@ from pydantic import Field
 from sentinel.config import Settings
 from sentinel.llm_ratelimit import (
     AsyncRateLimitTransport,
+    ProviderUsage,
     RateLimitPolicy,
     RateLimitTransport,
-    RateLimitWaits,
 )
 from sentinel.text import content_tokens, split_sentences
 
@@ -116,22 +116,23 @@ class MissingProviderError(RuntimeError):
 
 
 def rate_limited_clients(
-    waits: RateLimitWaits,
+    usage: ProviderUsage,
     policy: RateLimitPolicy,
     *,
     sync_inner: httpx.BaseTransport | None = None,
     async_inner: httpx.AsyncBaseTransport | None = None,
 ) -> dict[str, Any]:
-    """httpx clients that wait and resend on HTTP 429, recording every wait in `waits`.
-    The inner transports default to real HTTP; tests pass `httpx.MockTransport`."""
+    """httpx clients that resend on HTTP 429, 5xx and connection errors, recording waits and
+    tokens in `usage`. The inner transports default to real HTTP; tests pass
+    `httpx.MockTransport`."""
     return {
         "http_client": httpx.Client(
-            transport=RateLimitTransport(sync_inner or httpx.HTTPTransport(), waits, policy),
+            transport=RateLimitTransport(sync_inner or httpx.HTTPTransport(), usage, policy),
             timeout=LLM_TIMEOUT_S,
         ),
         "http_async_client": httpx.AsyncClient(
             transport=AsyncRateLimitTransport(
-                async_inner or httpx.AsyncHTTPTransport(), waits, policy
+                async_inner or httpx.AsyncHTTPTransport(), usage, policy
             ),
             timeout=LLM_TIMEOUT_S,
         ),
@@ -140,7 +141,9 @@ def rate_limited_clients(
 
 def rate_limit_policy(settings: Settings) -> RateLimitPolicy:
     return RateLimitPolicy(
-        retries=settings.llm_rate_limit_retries, max_wait_s=settings.llm_rate_limit_max_wait_s
+        retries=settings.llm_rate_limit_retries,
+        max_wait_s=settings.llm_rate_limit_max_wait_s,
+        server_retries=settings.llm_server_retries,
     )
 
 
@@ -160,10 +163,10 @@ def make_chat_model(
     client_options: Mapping[str, Any] | None = None,
     *,
     model: str | None = None,
-    waits: RateLimitWaits | None = None,
+    usage: ProviderUsage | None = None,
 ) -> BaseChatModel:
     """`client_options` are passed to the provider class as-is (e.g. `http_client`). `model`
-    overrides LLM_MODEL (the eval judge). `waits` collects Groq's rate-limit waits."""
+    overrides LLM_MODEL (the eval judge). `usage` collects Groq's retry waits and tokens."""
     provider = settings.llm_provider
     if provider == "mock":
         return MockLLM()
@@ -181,7 +184,7 @@ def make_chat_model(
             from langchain_openai import ChatOpenAI
 
             options = {
-                **rate_limited_clients(waits or RateLimitWaits(), rate_limit_policy(settings)),
+                **rate_limited_clients(usage or ProviderUsage(), rate_limit_policy(settings)),
                 **(client_options or {}),
                 **groq_options(settings, name),
                 "base_url": GROQ_BASE_URL,
@@ -189,7 +192,7 @@ def make_chat_model(
             return ChatOpenAI(
                 **common,
                 **options,
-                max_retries=0,  # 429s are retried (and timed) by the rate-limit transport
+                max_retries=0,  # the transport retries (and times) 429, 5xx and dropped calls
                 use_responses_api=False,
             )
         common.update(client_options or {})

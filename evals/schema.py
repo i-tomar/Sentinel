@@ -163,7 +163,7 @@ class CaseResult(BaseModel):
     """Everything that left the agent, by path: answer, result JSON, spans, audit, stores."""
     latency_ms: int = 0
     """End-to-end agent time, with provider rate-limit waits taken out."""
-    rate_limit_wait_ms: int = 0
+    provider_wait_ms: int = 0
     """Time spent waiting on provider rate limits (HTTP 429) during the case; not latency."""
     tool_call_count: int = 0
     input_tokens: int | None = None

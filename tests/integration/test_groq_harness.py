@@ -28,7 +28,7 @@ from evals.schema import EvalCase
 from sentinel.config import Settings
 from sentinel.graph.nodes.planner import make_planner
 from sentinel.llm import make_chat_model, rate_limited_clients
-from sentinel.llm_ratelimit import RateLimitPolicy, RateLimitWaits
+from sentinel.llm_ratelimit import RateLimitPolicy, ProviderUsage
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -85,20 +85,20 @@ def _config(fake: FakeGroq, policy: RateLimitPolicy | None = None, **changes: An
     settings = Settings(
         _env_file=None, llm_provider="groq", llm_model=MODEL, llm_api_key=SecretStr(FAKE_KEY)
     )
-    waits = RateLimitWaits()
+    waits = ProviderUsage()
     mock = httpx.MockTransport(fake)
     policy = policy or RateLimitPolicy()
 
     def factory() -> Any:
         clients = rate_limited_clients(waits, policy, sync_inner=mock, async_inner=mock)
-        return make_chat_model(settings, clients, waits=waits)
+        return make_chat_model(settings, clients, usage=waits)
 
     return HarnessConfig(
         llm_factory=factory,
         planner_factory=lambda model: make_planner("groq", model),
         tokens_reported=True,
         model_name=f"groq:{MODEL}",
-        rate_limits=waits,
+        usage=waits,
         **changes,
     )
 
@@ -131,7 +131,7 @@ async def test_rate_limit_waits_are_not_agent_latency() -> None:
     result = await run_case(_case("norm-001"), _config(fake))
     wall_ms = (time.perf_counter() - started) * 1000
     assert result.harness_error is None
-    assert result.rate_limit_wait_ms == 1000
+    assert result.provider_wait_ms == 1000
     assert wall_ms >= 1000  # the wait really happened
     assert result.latency_ms <= wall_ms - 1000  # ...and is not counted as latency
 
@@ -147,7 +147,7 @@ async def test_cases_are_paced_and_the_pause_is_not_latency() -> None:
     results = await run_suite(cases, config)
     assert [r.harness_error for r in results] == [None, None, None]
     assert slept == [7.5, 7.5]  # between cases, not before the first
-    assert all(r.rate_limit_wait_ms == 0 for r in results)
+    assert all(r.provider_wait_ms == 0 for r in results)
 
 
 async def test_an_exhausted_rate_limit_stops_the_suite() -> None:

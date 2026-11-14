@@ -35,7 +35,7 @@ from sentinel.graph.nodes.execute_tools import MCPToolExecutor
 from sentinel.graph.nodes.planner import Planner, RulePlanner
 from sentinel.graph.state import Evidence
 from sentinel.llm import MockLLM
-from sentinel.llm_ratelimit import RateLimitWaits
+from sentinel.llm_ratelimit import ProviderUsage
 from sentinel.memory.models import MemoryItem
 from sentinel.memory.sqlite_backend import SQLiteMemoryBackend
 from sentinel.permissions.approvals import ApprovalStore
@@ -65,7 +65,7 @@ class HarnessConfig:
     healthy call into a timeout and changes a deterministic metric."""
     fixture_timeout_s: float = 5.0
     """How long the fixture `timeout` failure mode stalls: well past `tool_timeout_s`."""
-    rate_limits: RateLimitWaits | None = None
+    usage: ProviderUsage | None = None
     """Shared with the model's HTTP clients (Groq): waits are taken out of latency, and an
     exhausted rate limit stops the suite."""
     case_delay_s: float = 0.0
@@ -259,9 +259,9 @@ async def _run(case: EvalCase, config: HarnessConfig, ds: FixtureDataset) -> Cas
             )
             for earlier in case.thread_setup:
                 await ask_async(earlier, deps, as_of=NOW, thread_id=case.id)
-            waited_before = config.rate_limits.waited_s if config.rate_limits else 0.0
+            waited_before = config.usage.waited_s if config.usage else 0.0
             result = await ask_async(case.question, deps, as_of=NOW, thread_id=case.id)
-            waited = (config.rate_limits.waited_s if config.rate_limits else 0.0) - waited_before
+            waited = (config.usage.waited_s if config.usage else 0.0) - waited_before
             snapshot = await build_graph(deps).aget_state({"configurable": {"thread_id": case.id}})
         approvals.close()
         evidence = _evidence(dict(snapshot.values or {}))
@@ -290,7 +290,7 @@ async def _run(case: EvalCase, config: HarnessConfig, ds: FixtureDataset) -> Cas
                 "policy_denied": any(a.status == "policy_denied" for a in result.actions),
                 "outputs": outputs,
                 "latency_ms": latency_ms,
-                "rate_limit_wait_ms": wait_ms,
+                "provider_wait_ms": wait_ms,
                 "tool_call_count": len(result.tool_calls),
                 "input_tokens": usage.input_tokens if config.tokens_reported else None,
                 "output_tokens": usage.output_tokens if config.tokens_reported else None,
@@ -316,8 +316,8 @@ async def run_suite(
         results.append(result)
         if progress:
             progress(i, len(cases), result)
-        if config.rate_limits is not None and config.rate_limits.exhausted:
+        if config.usage is not None and config.usage.exhausted:
             raise RateLimitExhaustedError(
-                f"stopped after {i}/{len(cases)} cases: {config.rate_limits.exhausted_reason}"
+                f"stopped after {i}/{len(cases)} cases: {config.usage.exhausted_reason}"
             )
     return results
