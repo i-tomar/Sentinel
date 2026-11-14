@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 from evals import run as eval_run
+from evals import runlog
 from evals.harness import TokenBudgetError
 from evals.runlog import RunInProgressError, RunLog, exclusive_run, log_path, run_id
 from evals.schema import CaseResult
@@ -24,9 +25,43 @@ def _logs(out: Path) -> list[Path]:
 
 
 def test_run_ids_name_the_time_model_subset_and_process() -> None:
-    rid = run_id(datetime(2026, 11, 14, 12, 6, 41, tzinfo=UTC), "groq:openai/gpt-oss-120b", "fast")
-    assert re.fullmatch(r"20261114T120641Z-groq-openai-gpt-oss-120b-fast-p\d+", rid)
+    started = datetime(2026, 11, 14, 12, 6, 41, 123456, tzinfo=UTC)
+    rid = run_id(started, "groq:openai/gpt-oss-120b", "fast")
+    assert re.fullmatch(
+        r"20261114T120641123456Z-groq-openai-gpt-oss-120b-fast-p\d+-[0-9a-f]{6}", rid
+    )
     assert log_path(Path("reports"), rid) == Path("reports/logs") / f"eval-{rid}.log"
+
+
+def test_run_ids_differ_even_in_the_same_process_and_instant() -> None:
+    # CI on PR #22: two runs in one process within one second got the same id.
+    started = datetime(2026, 11, 14, 18, 4, 3, tzinfo=UTC)
+    ids = {run_id(started, "mock", "filtered") for _ in range(50)}
+    assert len(ids) == 50
+
+
+def test_a_run_log_never_reuses_an_existing_file(tmp_path: Path) -> None:
+    path = tmp_path / "logs" / "eval-x.log"
+    with RunLog(path) as log:
+        log.line("first run")
+    with pytest.raises(FileExistsError):
+        RunLog(path)
+    assert path.read_text(encoding="utf-8") == "first run\n"  # untouched
+
+
+def test_new_run_log_picks_another_id_if_the_file_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ids = iter(["taken", "taken", "fresh"])
+    monkeypatch.setattr(runlog, "run_id", lambda *_a: next(ids))
+    with RunLog(log_path(tmp_path, "taken")) as log:
+        log.line("earlier run")
+    rid, log = runlog.new_run_log(tmp_path, datetime.now(UTC), "mock", "all")
+    with log:
+        log.line("this run")
+    assert rid == "fresh"
+    assert log_path(tmp_path, "taken").read_text(encoding="utf-8") == "earlier run\n"
+    assert log_path(tmp_path, "fresh").read_text(encoding="utf-8") == "this run\n"
 
 
 def test_the_run_log_writes_and_flushes_each_line(

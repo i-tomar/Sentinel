@@ -33,7 +33,7 @@ from evals.judge import CachedJudge, LLMJudge
 from evals.metrics import compute_metrics
 from evals.offline import block_network
 from evals.report import build_report, render_markdown
-from evals.runlog import RunInProgressError, RunLog, exclusive_run, log_path, run_id
+from evals.runlog import RunInProgressError, RunLog, exclusive_run, new_run_log
 from evals.schema import CaseResult, EvalCase
 from evals.subsets import FAST_CASES
 from sentinel.llm_ratelimit import ProviderUsage
@@ -191,10 +191,11 @@ def main(argv: list[str] | None = None) -> int:
     config = _config(args.llm, args.case_delay, args.token_budget)
     subset = "filtered" if args.case or args.category else ("fast" if args.fast else "all")
     started = datetime.now(UTC)
-    rid = run_id(started, config.model_name, subset)
     try:
-        with exclusive_run(args.out), RunLog(log_path(args.out, rid)) as log:
-            return _run(args, cases, config, subset, started, rid, log)
+        with exclusive_run(args.out):
+            rid, log = new_run_log(args.out, started, config.model_name, subset)
+            with log:
+                return _run(args, cases, config, subset, started, rid, log)
     except RunInProgressError as exc:
         print(f"error: {exc}", file=sys.stderr, flush=True)
         return 1
