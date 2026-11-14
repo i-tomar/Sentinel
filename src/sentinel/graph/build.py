@@ -40,7 +40,7 @@ from langgraph.graph import END, START, StateGraph
 from opentelemetry.trace import Tracer
 from pydantic import BaseModel
 
-from sentinel.citations import Citation
+from sentinel.citations import Citation, normalize_markers
 from sentinel.graph.conversation import context_from, prune_memory
 from sentinel.graph.nodes.answerer import build_messages, insufficient_answer, is_insufficient
 from sentinel.graph.nodes.citation_check import check_answer, ensure_failure_note
@@ -422,6 +422,7 @@ def build_graph(deps: Deps, raw_question: str | None = None) -> Any:
                 )
             )
             text = reply.content if isinstance(reply.content, str) else str(reply.content)
+            text = normalize_markers(text)  # gpt-oss cites in lenticular brackets; checks read [n]
             text = redact_str(text)  # the model's own output is PII-checked before it is stored
             set_text(span, "langfuse.observation.output", text)
         return {
