@@ -28,13 +28,14 @@ import anyio
 
 from evals.datasets import DATASETS_DIR, file_hashes, load_cases, read_manifest
 from evals.gate import GateResult, evaluate_gate
-from evals.harness import HarnessConfig, corpus_keys, run_suite
+from evals.harness import HarnessConfig, RateLimitExhaustedError, corpus_keys, run_suite
 from evals.judge import CachedJudge, LLMJudge
 from evals.metrics import compute_metrics
 from evals.offline import block_network
 from evals.report import build_report, render_markdown
 from evals.schema import CaseResult
 from evals.subsets import FAST_CASES
+from sentinel.llm_ratelimit import RateLimitWaits
 
 BASELINES_DIR = Path(__file__).parent / "baselines"
 
@@ -60,9 +61,9 @@ def _commit() -> str | None:
     return out.stdout.strip() or None
 
 
-def _config(llm: str) -> HarnessConfig:
+def _config(llm: str, case_delay_s: float = 0.0) -> HarnessConfig:
     if llm == "mock":
-        return HarnessConfig()
+        return HarnessConfig(case_delay_s=case_delay_s)
     from sentinel.config import get_settings
     from sentinel.graph.nodes.planner import make_planner
     from sentinel.llm import make_chat_model
@@ -71,13 +72,28 @@ def _config(llm: str) -> HarnessConfig:
     if settings.llm_provider == "mock":
         raise SystemExit("--llm configured needs LLM_PROVIDER/LLM_MODEL/LLM_API_KEY set")
     print(f"warning: calling a real model ({settings.llm_provider}:{settings.llm_model})")
+    waits = RateLimitWaits()
     return HarnessConfig(
-        llm_factory=lambda: make_chat_model(settings),
+        llm_factory=lambda: make_chat_model(settings, waits=waits),
         planner_factory=lambda model: make_planner(settings.llm_provider, model),
         tokens_reported=True,
         model_name=f"{settings.llm_provider}:{settings.llm_model}",
         tool_timeout_s=settings.tool_timeout_s,
+        rate_limits=waits,
+        case_delay_s=case_delay_s,
     )
+
+
+def _judge(config: HarnessConfig, cache: Path) -> CachedJudge:
+    """The judge uses LLM_JUDGE_MODEL when set (same provider and key), else the agent model.
+    Its verdict cache is keyed by the judge model."""
+    from sentinel.config import get_settings
+    from sentinel.llm import make_chat_model
+
+    settings = get_settings()
+    model = settings.llm_judge_model or settings.llm_model
+    llm = make_chat_model(settings, model=model, waits=config.rate_limits)
+    return CachedJudge(LLMJudge(llm), cache, model=f"{settings.llm_provider}:{model}")
 
 
 def baseline_note(gate: GateResult, *, advisory: bool) -> str | None:
@@ -127,6 +143,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--k", type=int, default=5, help="k for recall@k.")
     parser.add_argument("--report-only", action="store_true", help="Exit 0 even if the gate fails.")
     parser.add_argument(
+        "--case-delay",
+        type=float,
+        default=0.0,
+        metavar="SECONDS",
+        help="Pause between cases (stays under per-minute rate limits; not counted as latency).",
+    )
+    parser.add_argument(
         "--baseline-advisory",
         action="store_true",
         help="A missing/invalid baseline is reported but does not fail the exit code. "
@@ -150,21 +173,32 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.judge and args.llm != "configured":
         raise SystemExit("--judge needs --llm configured (the mock cannot judge)")
-    config = _config(args.llm)
-    judge = (
-        CachedJudge(LLMJudge(config.llm_factory()), args.judge_cache, model=config.model_name)
-        if args.judge
-        else None
-    )
+    if args.case_delay < 0:
+        raise SystemExit("--case-delay must be 0 or more")
+    config = _config(args.llm, args.case_delay)
+    judge = _judge(config, args.judge_cache) if args.judge else None
     started = datetime.now(UTC)
 
     def progress(i: int, total: int, result: CaseResult) -> None:
         status = "error" if result.harness_error else "ok"
-        print(f"[{i:>3}/{total}] {result.case_id:<10} {status}", flush=True)
+        wait = (
+            f" (rate-limit wait {result.rate_limit_wait_ms} ms)"
+            if result.rate_limit_wait_ms
+            else ""
+        )
+        print(f"[{i:>3}/{total}] {result.case_id:<10} {status}{wait}", flush=True)
 
     offline = block_network() if args.llm == "mock" else nullcontext()
-    with offline:
-        results = anyio.run(run_suite, cases, config, progress)
+    try:
+        with offline:
+            results = anyio.run(run_suite, cases, config, progress)
+    except RateLimitExhaustedError as exc:
+        print(
+            f"rate limit: {exc}. No report was written. Re-run later, raise "
+            "LLM_RATE_LIMIT_MAX_WAIT_S, increase --case-delay, or run --fast.",
+            file=sys.stderr,
+        )
+        return 1
     keys = corpus_keys(cases)
     flat = compute_metrics(results, corpus_keys=keys, k=args.k, judge=judge).flat()
     subset = "filtered" if args.case or args.category else ("fast" if args.fast else "all")
@@ -182,8 +216,18 @@ def main(argv: list[str] | None = None) -> int:
         "started_at": started.isoformat(timespec="seconds"),
         "judge": judge is not None,
         "judge_cache": {"hits": judge.hits, "misses": judge.misses} if judge else None,
+        "judge_model": judge.model if judge else None,
         "k": args.k,
         "baseline_note": note,
+        "case_delay_s": config.case_delay_s,
+        "rate_limit": (
+            {
+                "retries": config.rate_limits.retries,
+                "waited_s": round(config.rate_limits.waited_s, 1),
+            }
+            if config.rate_limits
+            else None
+        ),
     }
     report = build_report(results, corpus_keys=keys, gate=gate, meta=meta, k=args.k, judge=judge)
     args.out.mkdir(parents=True, exist_ok=True)

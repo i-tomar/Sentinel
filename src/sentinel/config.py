@@ -10,7 +10,7 @@ from typing import Annotated, Literal
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
-LLMProvider = Literal["openai", "google", "anthropic", "mock"]
+LLMProvider = Literal["openai", "google", "anthropic", "groq", "mock"]
 EmbeddingProvider = Literal["local", "hash", "openai", "google"]
 DataMode = Literal["fixture", "live"]
 MemoryBackendName = Literal["sqlite", "okf"]
@@ -31,6 +31,14 @@ class Settings(BaseSettings):
     llm_provider: LLMProvider = "mock"
     llm_model: str | None = None
     llm_api_key: SecretStr | None = None
+    llm_judge_model: str | None = None
+    """Model for the optional eval judge (same provider and key); defaults to LLM_MODEL."""
+    groq_reasoning_effort: Literal["low", "medium", "high"] = "low"
+    """Sent to Groq's gpt-oss models only. Reasoning tokens count against rate limits."""
+    llm_rate_limit_retries: int = Field(default=6, ge=0, le=20)
+    """Groq: resends after an HTTP 429 (rate limited) before giving up."""
+    llm_rate_limit_max_wait_s: float = Field(default=120.0, gt=0, le=86_400)
+    """Groq: longest single wait on a 429; a longer `retry-after` stops the run instead."""
 
     # Embeddings
     embedding_provider: EmbeddingProvider = "local"

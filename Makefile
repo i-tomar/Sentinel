@@ -85,8 +85,8 @@ approve: ## Approve and run one proposed write: make approve A=<approval id> S=<
 deny: ## Deny one proposed write: make deny A=<approval id> S=<session id>
 	$(UV) run sentinel deny $(A) --session $(S)
 
-serve: ## FastAPI on :8000                               [step l]
-	@echo "not implemented yet: lands in Phase 3 step l" && exit 1
+serve: ## Not built: Sentinel has no API server (use the CLI)
+	@echo "not built: there is no API server; use the CLI (make ask / make chat)" && exit 1
 
 eval: ## Full eval suite (mock LLM, fixtures, offline) -> reports/; exit 1 if the gate fails
 	$(UV) run python -m evals.run $(EVAL_ARGS)
@@ -94,5 +94,5 @@ eval: ## Full eval suite (mock LLM, fixtures, offline) -> reports/; exit 1 if th
 eval-fast: ## Deterministic eval subset (mock LLM, offline, ~1 min) -> reports/
 	$(UV) run python -m evals.run --fast $(EVAL_ARGS)
 
-baseline: ## Copy metrics -> evals/baseline.json (owner approval required) [step r]
-	@echo "not implemented yet: lands in Phase 4 step r" && exit 1
+baseline: ## Not automated: baselines are approved by the owner (see docs/eval-design.md)
+	@echo "not automated: an owner approves evals/baselines/<model>-<subset>.json with evals.gate.approve_baseline in a reviewed PR (docs/eval-design.md)" && exit 1

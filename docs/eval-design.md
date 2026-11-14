@@ -83,6 +83,20 @@ The harness then fills a `CaseResult`:
 `--llm configured` runs against the model in `LLM_PROVIDER`, `LLM_MODEL` and `LLM_API_KEY`.
 It is opt-in, never used by tests, and reports tokens where the provider returns them.
 
+**Rate limits (Groq).** `sentinel.llm_ratelimit` wraps the model's HTTP clients:
+
+- **Waiting out a 429.** The client waits for the server's `retry-after` seconds, or backs
+  off exponentially when there is none, then resends the same request, up to
+  `LLM_RATE_LIMIT_RETRIES` times. The OpenAI client's own retries are turned off, so every
+  wait goes through this one path.
+- **Not latency.** Each case reports `rate_limit_wait_ms`, and its `latency_ms` has that time
+  taken out. `--case-delay SECONDS` pauses between cases, outside latency too.
+- **Stopping.** If the server asks for a wait longer than `LLM_RATE_LIMIT_MAX_WAIT_S`, or the
+  retries run out, the run stops after that case with a message. No report is written, so a
+  daily limit doesn't produce a report full of failed cases.
+- **Per-model judge.** `LLM_JUDGE_MODEL` (same provider and key) selects the judge model, and
+  the verdict cache is keyed by it.
+
 **Why mock numbers are not model results.** The mock LLM answers by copying evidence
 sentences. It never follows instructions, so it can't be jailbroken, and it doesn't phrase
 answers.

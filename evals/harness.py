@@ -12,13 +12,14 @@ from __future__ import annotations
 import os
 import re
 import tempfile
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from contextlib import AsyncExitStack, contextmanager
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
+import anyio
 from langchain_core.language_models.chat_models import BaseChatModel
 from mcp import Client
 from opentelemetry.sdk.trace import TracerProvider
@@ -34,6 +35,7 @@ from sentinel.graph.nodes.execute_tools import MCPToolExecutor
 from sentinel.graph.nodes.planner import Planner, RulePlanner
 from sentinel.graph.state import Evidence
 from sentinel.llm import MockLLM
+from sentinel.llm_ratelimit import RateLimitWaits
 from sentinel.memory.models import MemoryItem
 from sentinel.memory.sqlite_backend import SQLiteMemoryBackend
 from sentinel.permissions.approvals import ApprovalStore
@@ -63,6 +65,22 @@ class HarnessConfig:
     healthy call into a timeout and changes a deterministic metric."""
     fixture_timeout_s: float = 5.0
     """How long the fixture `timeout` failure mode stalls: well past `tool_timeout_s`."""
+    rate_limits: RateLimitWaits | None = None
+    """Shared with the model's HTTP clients (Groq): waits are taken out of latency, and an
+    exhausted rate limit stops the suite."""
+    case_delay_s: float = 0.0
+    """Pause between cases, to stay under a provider's per-minute limits. Not latency."""
+    case_sleep: Callable[[float], Awaitable[None]] = anyio.sleep
+
+
+class RateLimitExhaustedError(RuntimeError):
+    """The provider kept rate-limiting (or asked for a longer wait than allowed)."""
+
+
+def agent_latency_ms(elapsed_ms: int, waited_s: float) -> tuple[int, int]:
+    """(latency without rate-limit waits, the waits) in ms."""
+    waited_ms = round(waited_s * 1000)
+    return max(0, elapsed_ms - waited_ms), waited_ms
 
 
 def corpus_keys(cases: Sequence[EvalCase], dataset: FixtureDataset | None = None) -> set[str]:
@@ -241,7 +259,9 @@ async def _run(case: EvalCase, config: HarnessConfig, ds: FixtureDataset) -> Cas
             )
             for earlier in case.thread_setup:
                 await ask_async(earlier, deps, as_of=NOW, thread_id=case.id)
+            waited_before = config.rate_limits.waited_s if config.rate_limits else 0.0
             result = await ask_async(case.question, deps, as_of=NOW, thread_id=case.id)
+            waited = (config.rate_limits.waited_s if config.rate_limits else 0.0) - waited_before
             snapshot = await build_graph(deps).aget_state({"configurable": {"thread_id": case.id}})
         approvals.close()
         evidence = _evidence(dict(snapshot.values or {}))
@@ -254,6 +274,7 @@ async def _run(case: EvalCase, config: HarnessConfig, ds: FixtureDataset) -> Cas
         }
         writes = _writes(audit)
         usage = result.token_usage
+        latency_ms, wait_ms = agent_latency_ms(result.latency_ms, waited)
         return _expected(case).model_copy(
             update={
                 "answer": result.answer,
@@ -268,7 +289,8 @@ async def _run(case: EvalCase, config: HarnessConfig, ds: FixtureDataset) -> Cas
                 "approval_requested": any(a.status == "pending_approval" for a in result.actions),
                 "policy_denied": any(a.status == "policy_denied" for a in result.actions),
                 "outputs": outputs,
-                "latency_ms": result.latency_ms,
+                "latency_ms": latency_ms,
+                "rate_limit_wait_ms": wait_ms,
                 "tool_call_count": len(result.tool_calls),
                 "input_tokens": usage.input_tokens if config.tokens_reported else None,
                 "output_tokens": usage.output_tokens if config.tokens_reported else None,
@@ -281,13 +303,21 @@ async def run_suite(
     config: HarnessConfig | None = None,
     progress: Callable[[int, int, CaseResult], None] | None = None,
 ) -> list[CaseResult]:
-    """Cases run one at a time: failure rules are process-wide environment variables."""
+    """Cases run one at a time: failure rules are process-wide environment variables.
+    Raises `RateLimitExhaustedError` (after reporting that case) once the provider's rate
+    limit could not be waited out, instead of failing every remaining case."""
     config = config or HarnessConfig()
     ds = build_dataset()
     results: list[CaseResult] = []
     for i, case in enumerate(cases, start=1):
+        if i > 1 and config.case_delay_s > 0:
+            await config.case_sleep(config.case_delay_s)
         result = await run_case(case, config, ds)
         results.append(result)
         if progress:
             progress(i, len(cases), result)
+        if config.rate_limits is not None and config.rate_limits.exhausted:
+            raise RateLimitExhaustedError(
+                f"stopped after {i}/{len(cases)} cases: {config.rate_limits.exhausted_reason}"
+            )
     return results

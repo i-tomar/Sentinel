@@ -143,6 +143,16 @@ edited, or a case cannot run. A real model is opt-in: `uv sync --extra openai` (
 `anthropic`, `google`), set `LLM_PROVIDER`, `LLM_MODEL` and `LLM_API_KEY`, then
 `uv run python -m evals.run --llm configured`.
 
+**Groq** (`LLM_PROVIDER=groq`) uses Groq's OpenAI-compatible API through the `openai` extra.
+Put the key in `.env` as `LLM_API_KEY`; it is never logged, traced or written to a report.
+`LLM_JUDGE_MODEL` optionally picks a different judge model. On HTTP 429 the client waits
+(`retry-after`, or exponential backoff) and resends, up to `LLM_RATE_LIMIT_RETRIES` times.
+Those waits are reported per case and are not counted as latency. `--case-delay SECONDS`
+paces the cases. A limit that would need a wait longer than `LLM_RATE_LIMIT_MAX_WAIT_S`
+(for example a daily token limit) stops the run with a message instead of failing every
+remaining case. Real-model baselines are per model, for example
+`evals/baselines/groq-openai-gpt-oss-120b-all.json`; none exists yet.
+
 **Without GNU make** (for example Windows PowerShell), run the commands from the `Makefile`
 directly: `uv run sentinel ingest`, `uv run sentinel ask "..."`, `uv run python -m evals.run`
 and `uv run python -m evals.run --fast`.
@@ -223,7 +233,8 @@ definitions, datasets and the gate's thresholds are in [docs/eval-design.md](doc
 
 `.github/workflows/eval.yml` runs the full suite with a real model when the `run-evals` label
 is applied, nightly, or manually. It needs the repository secret `LLM_API_KEY` and the
-variables `LLM_PROVIDER` and `LLM_MODEL`. None is configured, so it currently reports
+variables `LLM_PROVIDER` and `LLM_MODEL` (for Groq also, optionally, `LLM_JUDGE_MODEL` and
+`EVAL_CASE_DELAY_S`). None is configured, so it currently reports
 "skipped". There is no eval badge for the same reason: it would show green for a job that has
 never run a model.
 
