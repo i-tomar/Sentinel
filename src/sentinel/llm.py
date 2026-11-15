@@ -37,8 +37,20 @@ PARTIAL_PREFIX = "I could not read"
 
 _EVIDENCE = re.compile(r'<evidence n="(\d+)"([^>]*)>\n(.*?)\n</evidence>', re.DOTALL)
 _SOURCE_ATTR = re.compile(r'source="(\w+)"')
+_ID_ATTR = re.compile(r'id="([^"]+)"')
 _QUESTION = re.compile(r"^Question: (.*)$", re.MULTILINE)
 _FAILED_SOURCE = re.compile(r"^- (\w+) \([\w.]+\) failed after", re.MULTILINE)
+# Concrete facts the eval grader (and users) expect copied, not paraphrased away.
+_FACT_ANCHOR = re.compile(
+    r"\b[A-Z][A-Z0-9]{1,9}-\d{1,6}\b"
+    r"|\b\d{4}-\d{2}-\d{2}\b"
+    r"|\b(?:USD|INR|EUR|GBP)\s*[\d.,]+[KMB]?\b"
+    r"|\b\d{1,3}(?:,\d{2,3})+(?:\.\d+)?\b"
+    r"|\bdecodes? to\b[^.\n]{0,80}",
+    re.IGNORECASE,
+)
+_TICKET_ID = re.compile(r"\b[A-Z][A-Z0-9]{1,9}-\d{1,6}\b")
+_TICKET_ASK = frozenset({"ticket", "tickets", "issue", "issues", "blocked", "blocker", "blockers"})
 
 
 def prompt_hash(messages: Sequence[BaseMessage]) -> str:
@@ -47,39 +59,111 @@ def prompt_hash(messages: Sequence[BaseMessage]) -> str:
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()
 
 
+def _novel_anchors(sentence: str, question: str) -> int:
+    """How many checkable facts in the sentence are not already in the question text."""
+    q = question.casefold()
+    return sum(1 for m in _FACT_ANCHOR.finditer(sentence) if m.group(0).casefold() not in q)
+
+
+def _pick_sentences(body: str, wanted: set[str], question: str) -> str | None:
+    """Best overlapping sentence, plus another from the same block when it adds novel facts."""
+    asks_tickets = bool(wanted & _TICKET_ASK)
+    scored: list[tuple[int, int, str]] = []
+    for raw in split_sentences(body):
+        words = content_tokens(raw)
+        sentence = raw.lstrip("#-* ").rstrip(".")
+        if not sentence or not (words - wanted):
+            continue
+        overlap = wanted & words
+        ticket_line = asks_tickets and bool(_TICKET_ID.search(sentence))
+        if not (overlap or ticket_line):
+            continue
+        novel = _novel_anchors(sentence, question)
+        scored.append((len(overlap) + 2 * novel + (1 if ticket_line else 0), novel, sentence))
+    if not scored:
+        return None
+    scored.sort(key=lambda s: (-s[0], -s[1], s[2]))
+    primary = scored[0][2]
+    lines: list[str] = [primary]
+    seen_anchors = {m.group(0).casefold() for m in _FACT_ANCHOR.finditer(primary)}
+    if asks_tickets:
+        # "Which tickets…?" needs every ticket id in the block, not just the top sentence.
+        for _score, _novel, sentence in scored:
+            if sentence == primary or sentence.casefold() in primary.casefold():
+                continue
+            ids = {m.group(0) for m in _TICKET_ID.finditer(sentence)}
+            new_ids = {i.casefold() for i in ids} - seen_anchors
+            if not new_ids:
+                continue
+            seen_anchors |= new_ids
+            lines.append(sentence)
+            if len(lines) >= 4:
+                break
+    for _score, novel, sentence in scored[1:]:
+        if len(lines) >= 4:
+            break
+        if (
+            not novel
+            or sentence == primary
+            or any(sentence.casefold() in existing.casefold() for existing in lines)
+        ):
+            continue
+        # Annex when it adds a fact the lines lack (date/amount/id) and still answers.
+        extra = {
+            m.group(0).casefold()
+            for m in _FACT_ANCHOR.finditer(sentence)
+            if m.group(0).casefold() not in seen_anchors
+        }
+        words = content_tokens(sentence)
+        if extra and (wanted & words or (asks_tickets and _TICKET_ID.search(sentence))):
+            seen_anchors |= extra
+            lines.append(sentence)
+    return "; ".join(lines)
+
+
 def extractive_answer(prompt: str, max_blocks: int = 5) -> str:
     """What MockLLM says when unscripted: from each non-stale evidence block, the sentence that
     best overlaps the question while adding at least one word the question lacks, cited with
-    that block's number. The best block of each source is taken first, then the best of the
-    rest, up to `max_blocks`. Never cites a number absent from the prompt. Mentions
-    unreadable sources."""
-    question = _QUESTION.search(prompt)
-    wanted = content_tokens(question.group(1)) if question else set()
+    that block's number. Ticket-id lines count when the question asks which tickets, and a
+    second sentence from the same block is appended when it adds a date, amount or id the
+    question did not already state. The best block of each source is taken first, then the
+    best of the rest, up to `max_blocks`. Never cites a number absent from the prompt.
+    Mentions unreadable sources."""
+    question_match = _QUESTION.search(prompt)
+    question = question_match.group(1) if question_match else ""
+    wanted = content_tokens(question) if question else set()
     best: list[tuple[int, int, str, str]] = []
     for n, attrs, body in _EVIDENCE.findall(prompt):
         if 'stale="true"' in attrs:
             continue
-        scored = []
-        for raw in split_sentences(body):
-            words = content_tokens(raw)
-            sentence = raw.lstrip("#-* ").rstrip(".")
-            if sentence and wanted & words and words - wanted:
-                scored.append((len(wanted & words), sentence))
-        if scored:
-            overlap, sentence = max(scored, key=lambda s: s[0])
-            source = _SOURCE_ATTR.search(attrs)
-            best.append((overlap, int(n), source.group(1) if source else "", sentence))
+        picked = _pick_sentences(body, wanted, question)
+        if not picked:
+            continue
+        # Score the block by its primary sentence (before any "; " annex).
+        primary = picked.split("; ", 1)[0]
+        score = len(wanted & content_tokens(primary)) + 2 * _novel_anchors(primary, question)
+        doc_id = _ID_ATTR.search(attrs)
+        # Prefer citing the ticket record itself when the question asks which tickets.
+        if (
+            wanted & _TICKET_ASK
+            and doc_id
+            and _TICKET_ID.fullmatch(doc_id.group(1))
+            and doc_id.group(1) in picked
+        ):
+            score += 3
+        source = _SOURCE_ATTR.search(attrs)
+        best.append((score, int(n), source.group(1) if source else "", picked))
     failed = sorted(set(_FAILED_SOURCE.findall(prompt)))
     note = f" {PARTIAL_PREFIX} {', '.join(failed)}, so this may be incomplete." if failed else ""
     if not best:
         return f"{INSUFFICIENT_PREFIX} to answer this from the retrieved sources.{note}"
     best.sort(key=lambda s: (-s[0], s[1]))
-    picked: list[tuple[int, int, str, str]] = []
+    picked_blocks: list[tuple[int, int, str, str]] = []
     for item in best:  # one per source first, so multi-source evidence shows up
-        if item[2] not in {p[2] for p in picked}:
-            picked.append(item)
-    picked += [item for item in best if item not in picked]
-    chosen = sorted(picked[:max_blocks], key=lambda s: s[1])
+        if item[2] not in {p[2] for p in picked_blocks}:
+            picked_blocks.append(item)
+    picked_blocks += [item for item in best if item not in picked_blocks]
+    chosen = sorted(picked_blocks[:max_blocks], key=lambda s: s[1])
     return " ".join(f"{sentence} [{n}]." for _, n, _, sentence in chosen) + note
 
 

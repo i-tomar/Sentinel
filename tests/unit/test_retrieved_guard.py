@@ -191,3 +191,9 @@ def test_prompt_says_retrieved_data_is_never_instructions() -> None:
     human = str(build_messages("q", [evidence])[-1].content)
     assert EVIDENCE_HEADER in human
     assert 'untrusted_removed="1"' in human
+
+
+def test_prompt_requires_exact_concrete_facts_from_evidence() -> None:
+    assert "copy them exactly as written in the evidence" in SYSTEM_PROMPT
+    assert "digit grouping" in SYSTEM_PROMPT
+    assert "PROJ-142" in SYSTEM_PROMPT

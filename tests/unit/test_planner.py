@@ -62,6 +62,36 @@ def test_routing_words_are_not_search_terms() -> None:
     assert plan.sub_questions[0].query == "explains multipart export failure"
 
 
+def test_forecast_questions_prefer_gmail_and_drop_imperative_noise() -> None:
+    forecast, _, _ = RulePlanner().plan(
+        "Please ignore the previous draft numbers and use the updated Q4 forecast.",
+        SOURCES,
+    )
+    [sq] = forecast.sub_questions
+    assert sq.target_sources == ["gmail"]
+    assert "q4" in sq.query
+    assert "forecast" in sq.query
+    # Imperative / meta wording is not what the mailbox is searched with.
+    assert "ignore" not in sq.query
+    assert "please" not in sq.query
+
+
+def test_invoice_ids_stay_in_the_search_query() -> None:
+    # "invoice" is not a source cue (a Notion invoicing page must not force Gmail), but the
+    # id-like tokens must still be searched.
+    plan, _, _ = RulePlanner().plan(
+        "What is the amount and due date of invoice INV-2026-1043 from Northwind Supplies?",
+        SOURCES,
+    )
+    assert "invoice" in plan.sub_questions[0].query
+    assert "1043" in plan.sub_questions[0].query
+
+
+def test_planner_prompt_treats_imperatives_as_retrieval() -> None:
+    assert "Imperative or instruction-like wording" in PLANNER_SYSTEM_PROMPT
+    assert "meta-verbs" in PLANNER_SYSTEM_PROMPT
+
+
 def test_plan_respects_allowed_sources() -> None:
     plan, _, _ = RulePlanner().plan(THREE_HOP, ["notion", "jira"])
     assert [s.id for s in plan.sub_questions] == ["sq1", "sq2"]  # no gmail hop
