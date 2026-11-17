@@ -173,7 +173,7 @@ def test_real_model_baselines_are_per_provider_and_model() -> None:
     path = default_baseline(f"groq:{MODEL}", "all")
     assert path.name == "groq-openai-gpt-oss-120b-all.json"
     assert path.parent.name == "baselines"
-    assert not path.exists()  # no real-model baseline is created in this step
+    assert path.exists()  # approved from the 2-part groq-full-v2 merged run
 
 
 # --- token usage ---------------------------------------------------------------------------
