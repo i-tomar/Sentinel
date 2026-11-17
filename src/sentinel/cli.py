@@ -326,9 +326,7 @@ def _agent_deps(
 
 
 def _injection_detector(settings: Settings) -> InjectionDetector:
-    return make_injection_detector(
-        settings.injection_guard, threshold=settings.injection_threshold
-    )
+    return make_injection_detector(settings.injection_guard, threshold=settings.injection_threshold)
 
 
 def _policy(settings: Settings) -> Policy:

@@ -1,4 +1,4 @@
 {
-  "threshold": 0.42,
-  "path": "clf.joblib"
+  "threshold": 0.36,
+  "path": "injection_classifier.joblib"
 }

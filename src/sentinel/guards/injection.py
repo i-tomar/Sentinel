@@ -383,7 +383,7 @@ class InjectionDetector:
         findings = heuristic_findings(text, origin) if (text and use_h) else []
         h_score = self._heuristic_score(findings) if use_h else 0.0
         h_flag = use_h and h_score >= self.threshold
-        layers: list[Layer] = (["heuristic"] if use_h else [])
+        layers: list[Layer] = ["heuristic"] if use_h else []
 
         c_score = 0.0
         c_flag = False

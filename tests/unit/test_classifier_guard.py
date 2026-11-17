@@ -78,6 +78,9 @@ def test_make_detector_classifier_and_both_use_artifact() -> None:
     b = both.scan(attack, origin="user")
     assert b.flagged or not h.flagged or b.flagged == h.flagged
     assert "classifier" in clf.scan(attack, origin="user").layers
+    # Same detector path as retrieved_guard: classifier layer must run on retrieved origin too.
+    retrieved = both.scan(attack, origin="retrieved")
+    assert "classifier" in retrieved.layers
 
 
 def test_get_classifier_caches() -> None:
