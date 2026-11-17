@@ -33,6 +33,7 @@ from evals.judge import CachedJudge, LLMJudge
 from evals.metrics import compute_metrics
 from evals.offline import block_network
 from evals.report import build_report, render_markdown
+from evals.resultsio import write_results
 from evals.runlog import RunInProgressError, RunLog, exclusive_run, new_run_log
 from evals.schema import CaseResult, EvalCase
 from evals.subsets import FAST_CASES
@@ -288,7 +289,9 @@ def _run(
     report.pop("_metrics_objects")
     (args.out / "metrics.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     (args.out / "report.md").write_text(markdown, encoding="utf-8")
+    results_path = write_results(args.out, results)
     log.line(f"wrote {args.out / 'report.md'} and {args.out / 'metrics.json'}")
+    log.line(f"wrote {results_path} ({len(results)} case results for merge)")
     if usage is not None:
         log.line(
             f"provider: {usage.tokens} tokens, {usage.rate_limit_retries} rate-limit and "
