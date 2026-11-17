@@ -21,8 +21,9 @@ mock model, so anyone can clone it and run them without accounts or API keys. Re
 [threat model](docs/threat-model.md) for what it does and does not defend against.
 
 > **Status:** the CLI agent, guards, approvals and CI eval gate are built; an API and UI are
-> not. Every published number so far comes from the **mock LLM** (see [Results](#results)).
-> No real model and no live account have been used.
+> not. Mock numbers measure the pipeline offline; real-model numbers for Groq
+> `openai/gpt-oss-120b` are in [Results (real model)](#results-real-model). No live Notion,
+> Jira or Gmail account has been used.
 
 ## Architecture
 
@@ -160,10 +161,10 @@ Put the key in `.env` as `LLM_API_KEY`; it is never logged, traced or written to
 - **Run records.** Every run writes its own timestamped log, `reports/logs/eval-<run id>.log`.
   Each failed case gets a one-line error message with secrets and detected PII removed.
 
-Real-model baselines are per model, for example
-`evals/baselines/groq-openai-gpt-oss-120b-all.json`; none exists yet. Models that cite in
-other bracket styles (gpt-oss uses lenticular brackets) are normalised to `[n]` before the
-citation check.
+Real-model baselines are per model. Groq `openai/gpt-oss-120b` / subset `all` is approved at
+`evals/baselines/groq-openai-gpt-oss-120b-all.json` (see [Results (real model)](#results-real-model)).
+Models that cite in other bracket styles (gpt-oss uses lenticular brackets) are normalised to
+`[n]` before the citation check.
 
 **Without GNU make** (for example Windows PowerShell), run the commands from the `Makefile`
 directly: `uv run sentinel ingest`, `uv run sentinel ask "..."`, `uv run python -m evals.run`
@@ -237,18 +238,69 @@ Five cases need the optional LLM judge and are unscored. The mock reports no tok
 The every-PR CI job runs the 52-case subset against `evals/baselines/mock-fast.json`. Metric
 definitions, datasets and the gate's thresholds are in [docs/eval-design.md](docs/eval-design.md).
 
-### Real model
+### Results (real model)
 
-| Model | Answer correctness | Citation precision | Block rate (input / retrieved) | False-positive rate (input / retrieved) | p95 latency | Tokens per case |
-|---|---|---|---|---|---|---|
-| — | TBD (run eval.yml with a real model) | TBD (run eval.yml with a real model) | TBD (run eval.yml with a real model) | TBD (run eval.yml with a real model) | TBD (run eval.yml with a real model) | TBD (run eval.yml with a real model) |
+Numbers below are copied from `reports/groq-full-v2-merged/report.md` and match the approved
+baseline `evals/baselines/groq-openai-gpt-oss-120b-all.json`.
 
-`.github/workflows/eval.yml` runs the full suite with a real model when the `run-evals` label
-is applied, nightly, or manually. It needs the repository secret `LLM_API_KEY` and the
-variables `LLM_PROVIDER` and `LLM_MODEL` (for Groq also, optionally, `LLM_JUDGE_MODEL` and
-`EVAL_CASE_DELAY_S`). None is configured, so it currently reports
-"skipped". There is no eval badge for the same reason: it would show green for a job that has
-never run a model.
+- **Model:** Groq `openai/gpt-oss-120b`
+- **Dataset:** version 1.0.0, 124 cases, subset `all`, judge off
+- **Commit:** `7803d20`
+- **Baseline:** approved by Ishan (latency omitted; unset on the merged run)
+
+| Metric | all | dev | heldout |
+|---|---|---|---|
+| Answer correctness (deterministic) | 75.7% (n=74, CI 65%-84%) | 78.0% (n=59, CI 66%-87%) | 66.7% (n=15, CI 42%-85%) |
+| Citation precision (exists, returned, supported) | 52.9% (n=153, CI 45%-61%) | 56.6% (n=129, CI 48%-65%) | 33.3% (n=24, CI 18%-53%) |
+| Answers citing unreturned records (hallucinated citations) | 0.0% (n=88, CI 0%-4%) | 0.0% (n=71, CI 0%-5%) | 0.0% (n=17, CI 0%-18%) |
+| Retrieval recall@k | 0.85 (n=80) | 0.86 (n=63) | 0.82 (n=17) |
+| Attack block rate: input | 100.0% (n=23, CI 86%-100%) | 100.0% (n=10, CI 72%-100%) | 100.0% (n=13, CI 77%-100%) |
+| Attack block rate: retrieved | 60.0% (n=20, CI 39%-78%) | 58.3% (n=12, CI 32%-81%) | 62.5% (n=8, CI 31%-86%) |
+| False-positive rate: input | 2.3% (n=44, CI 0%-12%) | 0.0% (n=38, CI 0%-9%) | 16.7% (n=6, CI 3%-56%) |
+| False-positive rate: retrieved | 10.0% (n=10, CI 2%-40%) | 0.0% (n=7, CI 0%-35%) | 33.3% (n=3, CI 6%-79%) |
+| Approval requested for write requests | 100.0% (n=5, CI 57%-100%) | 100.0% (n=4, CI 51%-100%) | 100.0% (n=1, CI 21%-100%) |
+| Correct refusals | 50.0% (n=22, CI 31%-69%) | 100.0% (n=10, CI 72%-100%) | 8.3% (n=12, CI 1%-35%) |
+| Over-refusals | 1.2% (n=81, CI 0%-7%) | 0.0% (n=72, CI 0%-5%) | 11.1% (n=9, CI 2%-44%) |
+| Unapproved writes executed | 0 | 0 | 0 |
+| PII leaks (case, value, path) | 0 | 0 | 0 |
+
+**Notes**
+
+- The suite was run in **2 parts** on different days because of Groq's free daily token
+  limit, then merged by **pooling counts** (successes/n and weighted means), not by averaging
+  percentages. Latency is not reported on the merged run.
+- The input guard refused only **1 of 13** held-out attacks (7.7%). That is the main known
+  weakness; V2 will add a classifier guard.
+- Held-out citation precision is low (**33.3%**, n=24).
+- The guards lower risk but do not guarantee injection protection or complete PII removal.
+- Mock-mode numbers above are not real-model results; compare them only as a pipeline check.
+
+**How to reproduce**
+
+Safe defaults for everyday work (no credentials): `DATA_MODE=fixture`, `LLM_PROVIDER=mock`,
+`TRACING_BACKEND=none`. For the Groq run, set `LLM_PROVIDER=groq`, `LLM_MODEL=openai/gpt-oss-120b`
+and put the key in `.env` as `LLM_API_KEY` (never commit it; it is never written to a report).
+Then, on commit `7803d20` (or any tree that matches that eval code):
+
+```bash
+# Part 1 (stopped at the daily/token budget after 108 cases)
+uv run python -m evals.run --llm configured --case-delay 10 --token-budget 190000 \
+  --out reports/groq-full-v2 --baseline-advisory
+
+# Part 2 (the 16 remaining case ids)
+uv run python -m evals.run --llm configured --case-delay 10 --token-budget 60000 \
+  --out reports/groq-full-v2-part2 --baseline-advisory \
+  --case perm-007 --case pii-001 --case pii-002 --case pii-003 --case pii-004 \
+  --case pii-005 --case pii-006 --case tf-001 --case tf-002 --case tf-003 \
+  --case tf-004 --case tf-005 --case tf-006 --case tf-007 --case tf-008 --case tf-009
+
+# Merge (same commit + dataset hashes required)
+uv run python -m evals.merge reports/groq-full-v2 reports/groq-full-v2-part2 \
+  --out reports/groq-full-v2-merged --require-commit 7803d20 --subset all
+```
+
+`.github/workflows/eval.yml` can also run the full suite when `LLM_API_KEY` and the provider
+variables are configured.
 
 ## Known limitations
 
@@ -270,8 +322,8 @@ never run a model.
   or approval database, can approve. The audit log is a local file and not tamper-evident.
 - **The memory MCP server is local and single-user.** It has no authentication and no approval
   checks; any client that launches it can write memory directly. Use it over stdio only.
-- **Only mock results so far.** No real model has been evaluated, so there are no real
-  accuracy, resistance, latency or token numbers. The demo GIF is not recorded yet.
+- **Real-model coverage is one Groq run.** See [Results (real model)](#results-real-model).
+  Latency was not reported on the merged run. The demo GIF is not recorded yet.
 - **Small samples.** 124 cases in total, with 13 held-out input attacks and 8 held-out retrieved
   attacks. Intervals are wide, and cases built around the same record are correlated, so
   the true uncertainty is larger than shown.
@@ -322,8 +374,8 @@ More detail: [docs/threat-model.md](docs/threat-model.md#what-is-not-defended).
 
 ## Demo
 
-> **GIF: TBD (not recorded yet).** It will be recorded with a real model, because the mock's
-> answers are copied sentence fragments.
+<!-- I'll add docs/demo.gif -->
+![Sentinel demo](docs/demo.gif)
 
 Script (about 2 minutes, adapted from [the brief](docs/brief.md)):
 
@@ -370,10 +422,9 @@ and 9 were not.
 
 ## What I'd do next
 
-- Run `eval.yml` with a real model, approve a real-model baseline, and fill in the real-model
-  row and the demo GIF.
-- Improve detection on held-out attacks with a classifier layer, measured on a fresh held-out
-  set so that the existing one stays honest.
+- Record the demo GIF (`docs/demo.gif`) with a real model.
+- Improve detection on held-out attacks with a classifier layer (V2), measured on a fresh
+  held-out set so that the existing one stays honest.
 - Add an opt-in NER model for names and locations, and measure what it costs in false
   positives.
 - Build the API and a pause-and-resume approval flow on top of the same approval store.
