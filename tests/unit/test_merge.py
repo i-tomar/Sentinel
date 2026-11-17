@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -14,7 +15,7 @@ from evals.schema import CaseResult
 
 pytestmark = pytest.mark.unit
 
-DATASET_FILES = {
+DATASET_FILES: dict[str, str] = {
     "adversarial_retrieved.jsonl": "a" * 64,
     "adversarial_user.jsonl": "b" * 64,
     "benign_lookalikes.jsonl": "c" * 64,
@@ -65,14 +66,14 @@ def _metrics_blob(
     run_id: str,
     commit: str = "7803d20",
     tokens: int = 100,
-) -> dict:
+) -> dict[str, Any]:
     keys = {"jira:PROJ-142", "jira:PROJ-147", "notion:auth-migration-v2"}
-    by_split = {
+    by_split: dict[str, list[CaseResult]] = {
         "all": results,
         "dev": [r for r in results if r.split == "dev"],
         "heldout": [r for r in results if r.split == "heldout"],
     }
-    metrics = {
+    metrics: dict[str, Any] = {
         name: compute_metrics(rs, corpus_keys=keys, k=5).model_dump(mode="json")
         for name, rs in by_split.items()
     }
@@ -111,28 +112,30 @@ def _metrics_blob(
 
 def test_validate_parts_rejects_wrong_commit_or_duplicate_or_gap() -> None:
     planned = ["a-1", "a-2"]
-    ok = {
-        "meta": {
-            "commit": "7803d20",
-            "dataset_files": DATASET_FILES,
-            "dataset_version": "1.0.0",
-            "model": "m",
-            "k": 5,
-        },
+    ok_meta: dict[str, Any] = {
+        "commit": "7803d20",
+        "dataset_files": DATASET_FILES,
+        "dataset_version": "1.0.0",
+        "model": "m",
+        "k": 5,
+    }
+    ok: dict[str, Any] = {
+        "meta": ok_meta,
         "cases": [{"id": "a-1", "category": "normal", "split": "dev", "failures": []}],
     }
-    other = {
-        "meta": dict(ok["meta"]),
+    other: dict[str, Any] = {
+        "meta": dict(ok_meta),
         "cases": [{"id": "a-2", "category": "normal", "split": "dev", "failures": []}],
     }
     validate_parts([ok, other], require_commit="7803d20", planned_ids=planned)
 
-    bad_commit = {**other, "meta": {**other["meta"], "commit": "deadbee"}}
+    bad_meta: dict[str, Any] = {**dict(other["meta"]), "commit": "deadbee"}
+    bad_commit: dict[str, Any] = {**other, "meta": bad_meta}
     with pytest.raises(MergeError, match="commit"):
         validate_parts([ok, bad_commit], require_commit="7803d20", planned_ids=planned)
 
-    dup = {
-        "meta": dict(ok["meta"]),
+    dup: dict[str, Any] = {
+        "meta": dict(ok_meta),
         "cases": [{"id": "a-1", "category": "normal", "split": "dev", "failures": []}],
     }
     with pytest.raises(MergeError, match="appears"):
