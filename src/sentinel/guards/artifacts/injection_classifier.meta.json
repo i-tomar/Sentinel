@@ -1,0 +1,4 @@
+{
+  "threshold": 0.42,
+  "path": "clf.joblib"
+}

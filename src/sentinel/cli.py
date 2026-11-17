@@ -25,7 +25,7 @@ from sentinel.graph.build import AskResult, Deps, ask_async, thread_turns
 from sentinel.graph.checkpoint import open_checkpointer
 from sentinel.graph.nodes.execute_tools import MCPToolExecutor
 from sentinel.graph.nodes.planner import make_planner
-from sentinel.guards.injection import InjectionDetector
+from sentinel.guards.injection import InjectionDetector, make_injection_detector
 from sentinel.guards.redaction import redact_chunk, redact_str
 from sentinel.live.gmail import API as GMAIL_API
 from sentinel.live.gmail import READONLY_SCOPE
@@ -315,13 +315,19 @@ def _agent_deps(
         memory=memory,
         data_mode=settings.data_mode,
         memory_auto_approve=auto_approve,
-        injection_detector=InjectionDetector(threshold=settings.injection_threshold),
+        injection_detector=_injection_detector(settings),
         guard_mode=settings.retrieved_guard_mode,
-        input_detector=InjectionDetector(threshold=settings.injection_threshold),
+        input_detector=_injection_detector(settings),
         policy=_policy(settings),
         approvals=_approvals(settings),
         audit=AuditLog(settings.audit_log),
         principal=_principal(),
+    )
+
+
+def _injection_detector(settings: Settings) -> InjectionDetector:
+    return make_injection_detector(
+        settings.injection_guard, threshold=settings.injection_threshold
     )
 
 

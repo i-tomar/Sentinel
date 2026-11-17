@@ -6,11 +6,13 @@ inside quotes ('...' / "...") is a mention, not an instruction, and counts a qua
 Base64 blobs are decoded and re-scanned. Per rule the strongest match counts; rules combine
 as independent evidence: score = 1 - prod(1 - weight).
 
-Layer 2, classifier (optional): any object with `score(text) -> float`, combined the same way.
+Layer 2, classifier (optional): any object with `score(text) -> float`. Mode `classifier`
+uses only that score; mode `both` flags when the heuristic **or** the classifier flags
+(OR). Mode `heuristic` (default) ignores the classifier so existing baselines stay put.
 Layer 3, LLM judge (optional): asked only when the score falls in a borderline band; it can
 confirm (raise the score) or clear (lower it). Unusable judge output changes nothing.
 
-Pure Python apart from the optional judge; no network.
+Pure Python apart from the optional classifier/judge; no network at scan time.
 """
 
 from __future__ import annotations
@@ -35,6 +37,8 @@ MAX_DECODED_WEIGHT = 0.95
 
 Origin = Literal["user", "retrieved"]
 Layer = Literal["heuristic", "classifier", "judge"]
+InjectionGuardMode = Literal["heuristic", "classifier", "both"]
+"""Which layers run. Default `heuristic` keeps historical baselines unchanged."""
 
 
 class InjectionFinding(BaseModel):
@@ -358,23 +362,43 @@ class InjectionDetector:
         classifier: Classifier | None = None,
         judge: Judge | None = None,
         judge_band: tuple[float, float] | None = None,
+        mode: InjectionGuardMode = "heuristic",
+        classifier_threshold: float | None = None,
     ) -> None:
         self.threshold = threshold
         self.classifier = classifier
         self.judge = judge
         self.judge_band = judge_band or (0.25, threshold)
+        self.mode: InjectionGuardMode = mode
+        self.classifier_threshold = (
+            threshold if classifier_threshold is None else classifier_threshold
+        )
 
     def _heuristic_score(self, findings: Sequence[InjectionFinding]) -> float:
         return combine(findings)
 
     def scan(self, text: str, origin: Origin = "retrieved") -> InjectionResult:
-        findings = heuristic_findings(text, origin) if text else []
-        score = self._heuristic_score(findings)
-        layers: list[Layer] = ["heuristic"]
-        if self.classifier is not None and text:
-            c = min(1.0, max(0.0, float(self.classifier.score(text))))
-            score = round(1.0 - (1.0 - score) * (1.0 - c), 4)
+        use_h = self.mode in ("heuristic", "both")
+        use_c = self.mode in ("classifier", "both") and self.classifier is not None
+        findings = heuristic_findings(text, origin) if (text and use_h) else []
+        h_score = self._heuristic_score(findings) if use_h else 0.0
+        h_flag = use_h and h_score >= self.threshold
+        layers: list[Layer] = (["heuristic"] if use_h else [])
+
+        c_score = 0.0
+        c_flag = False
+        if use_c and text:
+            c_score = min(1.0, max(0.0, float(self.classifier.score(text))))  # type: ignore[union-attr]
+            c_flag = c_score >= self.classifier_threshold
             layers.append("classifier")
+
+        if self.mode == "classifier":
+            score, flagged = c_score, c_flag
+        elif self.mode == "both":
+            score, flagged = max(h_score, c_score), h_flag or c_flag
+        else:
+            score, flagged = h_score, h_flag
+
         low, high = self.judge_band
         if self.judge is not None and text and low <= score < high:
             verdict = self.judge.judge(text)
@@ -382,9 +406,10 @@ class InjectionDetector:
             if verdict is not None:
                 is_injection, confidence = verdict
                 score = max(score, confidence) if is_injection else min(score, 1.0 - confidence)
+                flagged = score >= self.threshold
         return InjectionResult(
             score=round(score, 4),
-            flagged=score >= self.threshold,
+            flagged=flagged,
             findings=findings,
             layers=layers,
         )
@@ -394,3 +419,28 @@ def scan(
     text: str, origin: Origin = "retrieved", threshold: float = DEFAULT_THRESHOLD
 ) -> InjectionResult:
     return InjectionDetector(threshold=threshold).scan(text, origin)
+
+
+def make_injection_detector(
+    mode: InjectionGuardMode = "heuristic",
+    threshold: float = DEFAULT_THRESHOLD,
+    *,
+    load_classifier: bool = True,
+) -> InjectionDetector:
+    """Build a detector for `INJECTION_GUARD`. Classifier artifact loads only when needed."""
+    if mode == "heuristic":
+        return InjectionDetector(threshold=threshold, mode="heuristic")
+    classifier = None
+    clf_threshold = threshold
+    if load_classifier:
+        from sentinel.guards.classifier import get_classifier
+
+        model = get_classifier()
+        classifier = model
+        clf_threshold = model.threshold
+    return InjectionDetector(
+        threshold=threshold,
+        classifier=classifier,
+        mode=mode,
+        classifier_threshold=clf_threshold,
+    )

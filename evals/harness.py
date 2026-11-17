@@ -17,7 +17,7 @@ from contextlib import AsyncExitStack, contextmanager
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import anyio
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -35,6 +35,7 @@ from sentinel.graph.checkpoint import open_checkpointer
 from sentinel.graph.nodes.execute_tools import MCPToolExecutor
 from sentinel.graph.nodes.planner import Planner, RulePlanner
 from sentinel.graph.state import Evidence
+from sentinel.guards.injection import make_injection_detector
 from sentinel.llm import MockLLM
 from sentinel.llm_ratelimit import ProviderUsage
 from sentinel.memory.models import MemoryItem
@@ -76,6 +77,8 @@ class HarnessConfig:
     """Stop before a case that would likely push the run's total tokens past this."""
     secrets: tuple[str, ...] = field(default=(), repr=False)
     """Values scrubbed from per-case error messages (the API key)."""
+    injection_guard: Literal["heuristic", "classifier", "both"] = "heuristic"
+    """Matches Settings.injection_guard; default heuristic keeps mock baselines stable."""
 
 
 class SuiteStoppedError(RuntimeError):
@@ -275,6 +278,7 @@ async def _run(case: EvalCase, config: HarnessConfig, ds: FixtureDataset) -> Cas
         llm = config.llm_factory()
         store = ChunkStore(QdrantClient(location=":memory:"), "eval", HashEmbedder())
         store.ensure_collection()
+        detector = make_injection_detector(config.injection_guard)
         async with AsyncExitStack() as stack:
             clients = {
                 "notion": await stack.enter_async_context(
@@ -299,6 +303,8 @@ async def _run(case: EvalCase, config: HarnessConfig, ds: FixtureDataset) -> Cas
                 checkpointer=saver,
                 memory=memory,
                 memory_auto_approve=True,  # the explicit eval flag (fixture data only)
+                injection_detector=detector,
+                input_detector=detector,
                 approvals=approvals,
                 audit=audit,
                 principal="eval",

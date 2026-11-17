@@ -16,6 +16,7 @@ DataMode = Literal["fixture", "live"]
 MemoryBackendName = Literal["sqlite", "okf"]
 LiveSource = Literal["notion", "jira", "gmail"]
 TracingBackend = Literal["langfuse", "langsmith", "none"]
+InjectionGuard = Literal["heuristic", "classifier", "both"]
 
 
 class Settings(BaseSettings):
@@ -96,6 +97,8 @@ class Settings(BaseSettings):
     # Guardrails & permissions
     allowed_email_domains: Annotated[tuple[str, ...], NoDecode] = ("acme.test",)
     injection_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+    injection_guard: InjectionGuard = "heuristic"
+    """heuristic (default, baselines unchanged) | classifier | both (flag if either flags)."""
     retrieved_guard_mode: Literal["remove", "quote"] = "remove"
     """How flagged spans in retrieved records are neutralized before planning and answering."""
     audit_log: Path = Path("./.data/audit.jsonl")
