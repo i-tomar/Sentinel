@@ -94,7 +94,8 @@ def merged_note(merged: dict[str, Any]) -> str:
     return (
         f"MERGED RUN: run in {len(parts) or 2} parts on different days "
         f"(run ids: {run_ids}; started: {days}). {how}. "
-        "Provider tokens are the sum of the parts. Not a baseline."
+        "Provider tokens are the sum of the parts. "
+        "Owner may approve as a baseline after review."
     )
 
 

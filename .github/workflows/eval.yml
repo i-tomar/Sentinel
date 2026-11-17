@@ -86,9 +86,10 @@ jobs:
 
       - name: Eval (full suite, real model)
         if: steps.secret.outputs.available == 'true'
-        # --baseline-advisory stays until an owner approves a baseline for this model. The
-        # mock baselines do not apply to a real-model run. A missing or invalid baseline is
-        # reported but does not fail the job. Hard rules always fail it.
+        # --baseline-advisory stays because LLM_MODEL is configurable; groq gpt-oss-120b/all
+        # has an approved baseline, but other real models may not. Mock baselines do not
+        # apply here. A missing or invalid baseline is reported but does not fail the job.
+        # Hard rules always fail it.
         run: >-
           uv run python -m evals.run --llm configured --baseline-advisory
           --case-delay "${EVAL_CASE_DELAY_S}"

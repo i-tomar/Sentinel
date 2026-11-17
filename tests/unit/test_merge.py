@@ -214,7 +214,9 @@ def test_merge_from_results_jsonl_recomputation(
     # Recomputed from CaseResults, not an average of the two part rates.
     assert report["flat"]["all"]["answer_correct"] == pytest.approx(2 / 3)
     assert (out / "report.md").read_text(encoding="utf-8").startswith("# Sentinel eval report")
-    assert "MERGED RUN" in (out / "report.md").read_text(encoding="utf-8")
+    report_md = (out / "report.md").read_text(encoding="utf-8")
+    assert "MERGED RUN" in report_md
+    assert "Owner may approve as a baseline after review." in report_md
     assert (out / "results.jsonl").is_file()
 
 

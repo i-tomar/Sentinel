@@ -230,7 +230,8 @@ def test_full_eval_workflow_triggers_and_skips_without_a_secret() -> None:
     assert "actions/cache" in raw  # judge results cached by hash
     assert "GITHUB_STEP_SUMMARY" in raw
     assert "actions/upload-artifact" in raw
-    assert "--baseline-advisory" in raw  # no real-model baseline is approved yet
+    # Model is configurable; keep advisory for runs whose baseline is still missing.
+    assert "--baseline-advisory" in raw
 
 
 def test_full_eval_workflow_supports_groq_with_the_same_skip() -> None:
