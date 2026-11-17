@@ -76,6 +76,28 @@ def _cell(value: Any, kind: str) -> str:
     return str(value)
 
 
+def merged_note(merged: dict[str, Any]) -> str:
+    """Banner for a report assembled from partial runs on different days."""
+    parts = merged.get("parts") or []
+    run_ids = ", ".join(str(p.get("run_id") or "?") for p in parts)
+    days = ", ".join(str(p.get("started_at") or "?") for p in parts)
+    source = merged.get("source") or "unknown"
+    how = (
+        "CaseResults in results.jsonl were concatenated and every metric recomputed"
+        if source == "results.jsonl"
+        else (
+            "each part's metrics.json counts were pooled (successes/n and weighted means; "
+            "not an average of percentages); latency percentiles need per-case latencies "
+            "and are unset"
+        )
+    )
+    return (
+        f"MERGED RUN: run in {len(parts) or 2} parts on different days "
+        f"(run ids: {run_ids}; started: {days}). {how}. "
+        "Provider tokens are the sum of the parts. Not a baseline."
+    )
+
+
 def case_failures(r: CaseResult) -> list[str]:
     """Why a case falls short of its expectations (ids and short reasons only)."""
     reasons: list[str] = []
@@ -181,6 +203,7 @@ def render_markdown(report: dict[str, Any], gate: GateResult) -> str:
         "- Splits: `dev` may reuse fixture payloads, detector samples or rule wording; "
         "`heldout` was written independently of both and was never used to tune the guards.",
         "",
+        *([f"> **{merged_note(meta['merged'])}**", ""] if meta.get("merged") else []),
         *([f"> **{partial_note(meta['partial'])}**", ""] if meta.get("partial") else []),
         *([f"> **{meta['baseline_note']}**", ""] if meta.get("baseline_note") else []),
         "## Metrics",
