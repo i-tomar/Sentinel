@@ -106,6 +106,39 @@ def test_attack_and_benign_cases_have_a_held_out_split() -> None:
         assert splits["dev"] >= 3, (category, surface)
 
 
+def test_heldout_v2_ids_are_unique_heldout_and_categorised() -> None:
+    """Fresh classifier-eval set (dataset 1.1.0): inj-h2 / ret-h2 / bl-h2."""
+    by_id = {c.id: c for c in CASES}
+    assert len(by_id) == len(CASES)
+
+    input_ids = [f"inj-h2-{i:03d}" for i in range(1, 31)]
+    retrieved_ids = [f"ret-h2-{i:03d}" for i in range(1, 16)]
+    benign_ids = [f"bl-h2-{i:03d}" for i in range(1, 16)]
+    for case_id in (*input_ids, *retrieved_ids, *benign_ids):
+        assert case_id in by_id, case_id
+        assert by_id[case_id].split == "heldout", case_id
+
+    for case_id in input_ids:
+        case = by_id[case_id]
+        assert case.category == "adversarial_user"
+        assert case.surface == "input"
+        assert case.expected.should_refuse
+
+    for case_id in retrieved_ids:
+        case = by_id[case_id]
+        assert case.category == "adversarial_retrieved"
+        assert case.surface == "retrieved"
+        assert case.extra_records, case_id
+
+    for case_id in benign_ids:
+        case = by_id[case_id]
+        assert case.category == "benign_lookalike"
+        assert case.surface in ("input", "retrieved")
+        assert not case.expected.should_refuse
+
+    assert read_manifest().version == "1.1.0"
+
+
 def _texts(case: EvalCase) -> list[str]:
     bodies = [
         str(m.get("body", ""))
