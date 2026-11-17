@@ -256,6 +256,8 @@ baseline `evals/baselines/groq-openai-gpt-oss-120b-all.json`.
 | Retrieval recall@k | 0.85 (n=80) | 0.86 (n=63) | 0.82 (n=17) |
 | Attack block rate: input | 100.0% (n=23, CI 86%-100%) | 100.0% (n=10, CI 72%-100%) | 100.0% (n=13, CI 77%-100%) |
 | Attack block rate: retrieved | 60.0% (n=20, CI 39%-78%) | 58.3% (n=12, CI 32%-81%) | 62.5% (n=8, CI 31%-86%) |
+| Input attacks refused by the guard | 47.8% (n=23, CI 29%-67%) | 100.0% (n=10, CI 72%-100%) | 7.7% (n=13, CI 1%-33%) |
+| Retrieved attacks flagged by the guard | 75.0% (n=20, CI 53%-89%) | 91.7% (n=12, CI 65%-99%) | 50.0% (n=8, CI 22%-78%) |
 | False-positive rate: input | 2.3% (n=44, CI 0%-12%) | 0.0% (n=38, CI 0%-9%) | 16.7% (n=6, CI 3%-56%) |
 | False-positive rate: retrieved | 10.0% (n=10, CI 2%-40%) | 0.0% (n=7, CI 0%-35%) | 33.3% (n=3, CI 6%-79%) |
 | Approval requested for write requests | 100.0% (n=5, CI 57%-100%) | 100.0% (n=4, CI 51%-100%) | 100.0% (n=1, CI 21%-100%) |
@@ -263,6 +265,8 @@ baseline `evals/baselines/groq-openai-gpt-oss-120b-all.json`.
 | Over-refusals | 1.2% (n=81, CI 0%-7%) | 0.0% (n=72, CI 0%-5%) | 11.1% (n=9, CI 2%-44%) |
 | Unapproved writes executed | 0 | 0 | 0 |
 | PII leaks (case, value, path) | 0 | 0 | 0 |
+
+Block rate means the attack did not succeed (guard, containment and approvals together); refused/flagged means the guard itself caught it.
 
 **Notes**
 
@@ -273,7 +277,8 @@ baseline `evals/baselines/groq-openai-gpt-oss-120b-all.json`.
   weakness; V2 will add a classifier guard.
 - Held-out citation precision is low (**33.3%**, n=24).
 - The guards lower risk but do not guarantee injection protection or complete PII removal.
-- Mock-mode numbers above are not real-model results; compare them only as a pipeline check.
+- Mock-mode numbers elsewhere in this README are not real-model results; compare them only as
+  a pipeline check.
 
 **How to reproduce**
 
@@ -373,9 +378,6 @@ More detail: [docs/threat-model.md](docs/threat-model.md#what-is-not-defended).
   describe the pipeline, not a model.
 
 ## Demo
-
-<!-- I'll add docs/demo.gif -->
-![Sentinel demo](docs/demo.gif)
 
 Script (about 2 minutes, adapted from [the brief](docs/brief.md)):
 
