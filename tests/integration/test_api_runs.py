@@ -11,7 +11,10 @@ from fastapi.testclient import TestClient
 from evals.datasets import load_cases
 from sentinel.api.app import create_app
 from sentinel.api.models import MAX_QUESTION_CHARS
+from sentinel.api.rate_limit import RateLimiter
 from sentinel.api.runtime import DEMO_DATA_MODE, DEMO_LLM, DemoRuntime
+from sentinel.api.store import RunStore
+from sentinel.config import get_settings
 from servers.fixtures.generate import PII_SEEDS
 
 pytestmark = pytest.mark.integration
@@ -135,3 +138,49 @@ def test_unknown_run_is_not_found(client: TestClient) -> None:
     res = client.get("/api/runs/does-not-exist")
     assert res.status_code == 404
     assert res.json()["error"]["code"] == "not_found"
+
+
+def test_openapi_json_disabled(client: TestClient) -> None:
+    assert client.get("/openapi.json").status_code == 404
+
+
+def test_partial_groq_env_still_runs_mock(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "groq")
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    get_settings.cache_clear()
+    res = client.post("/api/runs", json={"question": OWNER_Q})
+    assert res.status_code == 201, res.text
+    assert res.json()["mode"] == "fixture"
+
+
+def test_rate_limit_returns_429_with_retry_after() -> None:
+    limiter = RateLimiter(max_calls=1, window_s=60.0)
+    with TestClient(create_app(DemoRuntime(), rate_limiter=limiter)) as c:
+        assert c.post("/api/runs", json={"question": OWNER_Q}).status_code == 201
+        limited = c.post("/api/runs", json={"question": OWNER_Q})
+        assert limited.status_code == 429
+        err = limited.json()["error"]
+        assert err["code"] == "rate_limited"
+        assert "request_id" in err
+        assert limited.headers.get("Retry-After")
+        assert int(limited.headers["Retry-After"]) >= 1
+
+
+def test_evicted_run_returns_404_envelope() -> None:
+    demo = DemoRuntime()
+    demo.store = RunStore(max_runs=1)
+    with TestClient(create_app(demo)) as c:
+        first = c.post("/api/runs", json={"question": OWNER_Q})
+        assert first.status_code == 201, first.text
+        old_id = first.json()["run_id"]
+        second = c.post("/api/runs", json={"question": OWNER_Q})
+        assert second.status_code == 201, second.text
+        missing = c.get(f"/api/runs/{old_id}")
+        assert missing.status_code == 404
+        err = missing.json()["error"]
+        assert err["code"] == "not_found"
+        assert "request_id" in err
+        assert c.get(f"/api/runs/{second.json()['run_id']}").status_code == 200

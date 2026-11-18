@@ -13,10 +13,18 @@ from sentinel.api.models import ErrorBody, ErrorEnvelope
 
 
 class ApiError(Exception):
-    def __init__(self, code: str, message: str, status_code: int = 400) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        status_code: int = 400,
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         self.code = code
         self.message = message
         self.status_code = status_code
+        self.headers = headers or {}
         super().__init__(message)
 
 
@@ -25,9 +33,20 @@ def request_id_of(request: Request) -> str:
     return str(rid) if rid else "unknown"
 
 
-def error_response(*, code: str, message: str, request_id: str, status_code: int) -> JSONResponse:
+def error_response(
+    *,
+    code: str,
+    message: str,
+    request_id: str,
+    status_code: int,
+    headers: dict[str, str] | None = None,
+) -> JSONResponse:
     body = ErrorEnvelope(error=ErrorBody(code=code, message=message, request_id=request_id))
-    return JSONResponse(status_code=status_code, content=body.model_dump(mode="json"))
+    return JSONResponse(
+        status_code=status_code,
+        content=body.model_dump(mode="json"),
+        headers=headers or None,
+    )
 
 
 async def api_error_handler(request: Request, exc: ApiError) -> JSONResponse:
@@ -36,6 +55,7 @@ async def api_error_handler(request: Request, exc: ApiError) -> JSONResponse:
         message=exc.message,
         request_id=request_id_of(request),
         status_code=exc.status_code,
+        headers=exc.headers,
     )
 
 

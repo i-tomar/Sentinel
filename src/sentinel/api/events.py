@@ -25,13 +25,22 @@ def _duration_ms(span: ReadableSpan) -> int | None:
     return max(0, int((span.end_time - span.start_time) / 1_000_000))
 
 
-def _stage_status(span: ReadableSpan) -> StageStatus:
+def _span_status(span: ReadableSpan) -> StageStatus:
     code = span.status.status_code.name if span.status else "UNSET"
     if code == "ERROR":
         return "failed"
     if span.end_time is not None:
         return "completed"
     return "started"
+
+
+def _stage_status(stage: str, result: AskResult, span: ReadableSpan) -> StageStatus:
+    """Span outcome, plus result-driven failures for citation/output stages."""
+    if stage == "citation_check" and not result.citation_report.ok:
+        return "failed"
+    if stage == "output_guard" and result.output_redactions:
+        return "failed"
+    return _span_status(span)
 
 
 def _summary(stage: str, result: AskResult) -> str:
@@ -88,7 +97,7 @@ def events_from_spans(exporter: InMemorySpanExporter, result: AskResult) -> list
         events.append(
             StageEvent(
                 stage=stage,
-                status=_stage_status(span),
+                status=_stage_status(stage, result, span),
                 started_at=_ns_to_dt(span.start_time),
                 completed_at=_ns_to_dt(span.end_time),
                 duration_ms=_duration_ms(span),

@@ -22,7 +22,6 @@ from sentinel.api.models import MAX_QUESTION_CHARS, CreateRunRequest, CreateRunR
 from sentinel.api.rate_limit import RateLimiter
 from sentinel.api.runtime import DemoRuntime, events_payload, health_payload, result_payload
 
-_RATE = RateLimiter(max_calls=30, window_s=60.0)
 _OVERRIDE_HEADERS = frozenset({"x-llm-provider", "x-llm-model", "x-data-mode", "x-injection-guard"})
 
 
@@ -35,8 +34,13 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
         return response
 
 
-def create_app(runtime: DemoRuntime | None = None) -> FastAPI:
+def create_app(
+    runtime: DemoRuntime | None = None,
+    *,
+    rate_limiter: RateLimiter | None = None,
+) -> FastAPI:
     demo = runtime or DemoRuntime()
+    limiter = rate_limiter or RateLimiter(max_calls=30, window_s=60.0)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -52,8 +56,10 @@ def create_app(runtime: DemoRuntime | None = None) -> FastAPI:
         lifespan=lifespan,
         docs_url=None,
         redoc_url=None,
+        openapi_url=None,
     )
     app.state.runtime = demo
+    app.state.rate_limiter = limiter
     app.add_middleware(RequestIdMiddleware)
     # Starlette types handlers as Exception; our callables take the concrete type.
     app.add_exception_handler(ApiError, api_error_handler)  # type: ignore[arg-type]
@@ -68,8 +74,14 @@ def create_app(runtime: DemoRuntime | None = None) -> FastAPI:
     @app.post("/api/runs", status_code=201)
     async def create_run(body: CreateRunRequest, request: Request) -> CreateRunResponse:
         client = request.client.host if request.client else "unknown"
-        if not _RATE.allow(client):
-            raise ApiError("rate_limited", "too many runs; try again later", status_code=429)
+        limiter = request.app.state.rate_limiter
+        if not limiter.allow(client):
+            raise ApiError(
+                "rate_limited",
+                "too many runs; try again later",
+                status_code=429,
+                headers={"Retry-After": str(limiter.retry_after_s(client))},
+            )
         # Reject oversized even if a client bypasses model max (defense in depth).
         if len(body.question) > MAX_QUESTION_CHARS:
             raise ApiError(

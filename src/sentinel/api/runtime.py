@@ -8,13 +8,16 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from mcp import Client
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from qdrant_client import QdrantClient
 
+from sentinel import __version__
 from sentinel.api.events import events_from_spans
 from sentinel.api.models import RunStatus, StageEvent, run_status_from_result
 from sentinel.api.store import RunStore, StoredRun
-from sentinel.config import Settings
 from sentinel.graph.build import AskResult, Deps, ask_async
 from sentinel.graph.nodes.execute_tools import MCPToolExecutor
 from sentinel.llm import MockLLM
@@ -22,7 +25,7 @@ from sentinel.retrieval.embed import HashEmbedder
 from sentinel.retrieval.ingest import ingest
 from sentinel.retrieval.models import Source
 from sentinel.retrieval.store import ChunkStore
-from sentinel.tracing import build_tracer_provider, get_tracer
+from sentinel.tracing import RedactingSpanExporter, get_tracer
 from servers.fixtures import gmail_mcp, jira_mcp, notion_mcp
 
 # Demo safety: fixed regardless of process env or client payload.
@@ -76,13 +79,12 @@ class DemoRuntime:
     def _deps(self, exporter: InMemorySpanExporter) -> Deps:
         if self._chunk_store is None or self._clients is None:
             raise RuntimeError("runtime not started")
-        # Tracer settings are local; Deps forces fixture/mock regardless of process env.
-        tracer = get_tracer(
-            build_tracer_provider(
-                Settings.model_validate({"tracing_backend": "none"}),
-                exporter=exporter,
-            )
+        # In-memory tracer only — no BaseSettings / env / .env (avoids loading API keys).
+        provider = TracerProvider(
+            resource=Resource.create({"service.name": "sentinel", "service.version": __version__})
         )
+        provider.add_span_processor(SimpleSpanProcessor(RedactingSpanExporter(exporter)))
+        tracer = get_tracer(provider)
         return Deps(
             store=self._chunk_store,
             llm=MockLLM(),
