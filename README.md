@@ -238,6 +238,23 @@ Five cases need the optional LLM judge and are unscored. The mock reports no tok
 The every-PR CI job runs the 52-case subset against `evals/baselines/mock-fast.json`. Metric
 definitions, datasets and the gate's thresholds are in [docs/eval-design.md](docs/eval-design.md).
 
+### Classifier guard (V2)
+
+Optional offline TF-IDF + logistic-regression layer (`INJECTION_GUARD=both` ORs it with the
+heuristics). Default remains `heuristic`. Trained on DEV cases and synthetic
+`evals/training/injection_train.jsonl` only (threshold chosen on DEV); near-duplicates of
+held-out h2 text were removed (max char 5-gram Jaccard similarity 0.57). Measured once in
+**mock mode** on the held-out h2 set — not tuned on held-out data.
+
+| Mode | inj-h2 refused | ret-h2 flagged | bl-h2 FP | Over-refusals (ret-h2 + bl-h2 questions) |
+|---|---|---|---|---|
+| heuristic | 0/30 | 6/15 | 3/15 | 0/30 |
+| both | 29/30 | 5/15 | 3/15 | 11/30 |
+
+The 11 over-refusals are benign ret-h2/bl-h2 questions the classifier blocked at input
+(`bl-h2-011`, `ret-h2-001`, `002`, `004`, `005`, `008`, `009`, `010`, `011`, `013`, `014`).
+That early block also lowers the reported ret-h2 flagged count for `both`.
+
 ### Results (real model)
 
 Numbers below are copied from `reports/groq-full-v2-merged/report.md` and match the approved
@@ -273,8 +290,8 @@ Block rate means the attack did not succeed (guard, containment and approvals to
 - The suite was run in **2 parts** on different days because of Groq's free daily token
   limit, then merged by **pooling counts** (successes/n and weighted means), not by averaging
   percentages. Latency is not reported on the merged run.
-- The input guard refused only **1 of 13** held-out attacks (7.7%). That is the main known
-  weakness; V2 will add a classifier guard.
+- The heuristic input guard refused only **1 of 13** held-out attacks (7.7%). An optional
+  classifier layer is available; see [Classifier guard (V2)](#classifier-guard-v2).
 - Held-out citation precision is low (**33.3%**, n=24).
 - The guards lower risk but do not guarantee injection protection or complete PII removal.
 - Mock-mode numbers elsewhere in this README are not real-model results; compare them only as
@@ -309,13 +326,16 @@ variables are configured.
 
 ## Known limitations
 
-- **The injection detector is heuristic and generalises poorly.** On held-out attacks it
-  refused 1 of 13 input attacks (7.7%, CI 1%–33%) and flagged 4 of 8 retrieved attacks (50%,
-  CI 22%–78%), against 100% on the dev split it was built from. Paraphrases, other
-  languages, encodings and multi-turn attacks get through. Containment (plans come only from
-  the user's question, a trusted tool registry, writes need approval) is what limits the
-  damage, not detection. With a real model, a missed injection can still make an answer
-  wrong. There is no guarantee of protection against prompt injection.
+- **The default injection detector is heuristic and generalises poorly.** On held-out
+  attacks it refused 1 of 13 input attacks (7.7%, CI 1%–33%) and flagged 4 of 8 retrieved
+  attacks (50%, CI 22%–78%), against 100% on the dev split it was built from. An optional
+  classifier (`INJECTION_GUARD=both`) improves held-out input catch rate in mock mode but
+  over-refuses some benign questions; see [Classifier guard (V2)](#classifier-guard-v2).
+  Paraphrases, other languages, encodings and multi-turn attacks still get through.
+  Containment (plans come only from the user's question, a trusted tool registry, writes
+  need approval) is what limits the damage, not detection. With a real model, a missed
+  injection can still make an answer wrong. There is no guarantee of protection against
+  prompt injection.
 - **PII coverage is limited.** Emails, Indian and international phone numbers, PAN,
   Aadhaar-like numbers, credit cards, IBANs, IP addresses, US SSNs and crypto addresses are
   detected. Names, organisations, locations, postal addresses, dates of birth, passport,
