@@ -64,13 +64,18 @@ def _commit() -> str | None:
 
 
 def _config(llm: str, case_delay_s: float = 0.0, token_budget: int | None = None) -> HarnessConfig:
+    from sentinel.config import Settings, get_settings
+
+    settings = Settings() if llm == "mock" else get_settings()
     if llm == "mock":
-        return HarnessConfig(case_delay_s=case_delay_s, token_budget=token_budget)
-    from sentinel.config import get_settings
+        return HarnessConfig(
+            case_delay_s=case_delay_s,
+            token_budget=token_budget,
+            injection_guard=settings.injection_guard,
+        )
     from sentinel.graph.nodes.planner import make_planner
     from sentinel.llm import make_chat_model
 
-    settings = get_settings()
     if settings.llm_provider == "mock":
         raise SystemExit("--llm configured needs LLM_PROVIDER/LLM_MODEL/LLM_API_KEY set")
     usage = ProviderUsage()
@@ -85,6 +90,7 @@ def _config(llm: str, case_delay_s: float = 0.0, token_budget: int | None = None
         case_delay_s=case_delay_s,
         token_budget=token_budget,
         secrets=(key,) if key else (),
+        injection_guard=settings.injection_guard,
     )
 
 
